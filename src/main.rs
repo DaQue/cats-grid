@@ -441,6 +441,8 @@ struct App {
     cells: Vec<Cell>,
     /// egui time of each cell's last change (drives pop / fade animations)
     changed_at: Vec<f64>,
+    /// cells in the order X's were placed (may hold stale entries; Undo skips them)
+    x_log: Vec<usize>,
     lives: u8,
     max_lives: u8,
     hint: Option<(usize, usize)>,
@@ -484,6 +486,7 @@ impl App {
             deds_for: Vec::new(),
             cells: vec![Cell::Empty; DEFAULT_N * DEFAULT_N],
             changed_at: vec![UNCHANGED; DEFAULT_N * DEFAULT_N],
+            x_log: Vec::new(),
             lives: 3,
             max_lives: 3,
             hint: None,
@@ -528,6 +531,7 @@ impl App {
         self.puzzle = None;
         self.cells = vec![Cell::Empty; self.n * self.n];
         self.changed_at = vec![UNCHANGED; self.n * self.n];
+        self.x_log.clear();
         self.lives = self.max_lives;
         self.hint = None;
         self.hint_text = None;
@@ -556,6 +560,7 @@ impl App {
                     self.n = rep.puzzle.n;
                     self.cells = vec![Cell::Empty; self.n * self.n];
                     self.changed_at = vec![UNCHANGED; self.n * self.n];
+                    self.x_log.clear();
                     self.puzzle = Some(Rc::new(rep.puzzle));
                     if std::env::var_os("CATS_DEBUG").is_some() {
                         if let Some(p) = &self.puzzle {
@@ -587,6 +592,9 @@ impl App {
         if self.cells[idx] != v {
             self.cells[idx] = v;
             self.changed_at[idx] = self.now;
+            if v == Cell::X {
+                self.x_log.push(idx);
+            }
         }
     }
 
@@ -715,7 +723,15 @@ impl App {
             &|g| color_name(g, n),
             &|r, c| self.cells[r * n + c] == Cell::Empty,
         );
+        // Colour rules are usually outsized by row/column ones, so make sure the
+        // best one still gets a slot while staying within the cap.
+        if self.deds.len() > MAX_DEDUCTIONS && !self.deds[..MAX_DEDUCTIONS].iter().any(|d| d.colour) {
+            if let Some(at) = self.deds.iter().position(|d| d.colour) {
+                self.deds.swap(MAX_DEDUCTIONS - 1, at);
+            }
+        }
         self.deds.truncate(MAX_DEDUCTIONS);
+        self.deds.sort_by_key(|d| std::cmp::Reverse(d.cells.len()));
     }
 
     /// Apply one rule's X marks and show the reasoning behind them.
@@ -783,8 +799,24 @@ impl App {
         }
         self.hint = None;
         self.hint_text = None;
+        self.x_log.clear();
         self.last_click = None;
         self.message = String::from("Marks cleared.");
+    }
+
+    /// Remove the most recently placed X that is still on the board.
+    fn undo_x(&mut self) {
+        if self.won || self.game_over {
+            return;
+        }
+        while let Some(idx) = self.x_log.pop() {
+            if self.cells.get(idx) == Some(&Cell::X) {
+                self.set_cell(idx, Cell::Empty);
+                self.last_click = None;
+                self.message = String::from("Removed the last X.");
+                return;
+            }
+        }
     }
 
     // ── mouse model ──
@@ -1018,10 +1050,10 @@ impl App {
             ui.add_space(8.0);
         }
 
-        let labels = ["Hint", "Extra life", "Clear marks", "New game"];
+        let labels = ["Hint", "Extra life", "Undo X", "Clear marks", "New game"];
         let spacing = 10.0;
         let total: f32 =
-            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 2.0 + GROUP_GAP;
+            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 3.0 + GROUP_GAP;
         let avail = ui.available_width();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = spacing;
@@ -1031,6 +1063,10 @@ impl App {
             }
             if pill_button(ui, "Extra life", Kind::Tonal, !self.won && self.puzzle.is_some()).clicked() {
                 self.buy_extra_life();
+            }
+            let has_x = playing && self.cells.contains(&Cell::X);
+            if pill_button(ui, "Undo X", Kind::Tonal, has_x).clicked() {
+                self.undo_x();
             }
             if pill_button(ui, "Clear marks", Kind::Tonal, !self.won).clicked() {
                 self.clear_marks();

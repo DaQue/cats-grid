@@ -413,8 +413,8 @@ struct Drag {
     origin: usize,
     last: Pos2,
     painting: bool,
-    /// cells already flipped during this stroke — one flip per cell per drag
-    touched: Vec<usize>,
+    /// cell the pointer is currently in; every entry into a new cell flips it once
+    cur: usize,
 }
 
 struct App {
@@ -793,13 +793,14 @@ impl App {
         }
     }
 
-    /// Drag stroke: flip every cell the pointer enters exactly once, so a drag
-    /// over unmarked cells sets X's and a drag over X's clears them.
-    fn drag_flip(&mut self, idx: usize, touched: &mut Vec<usize>) {
-        if touched.contains(&idx) {
+    /// Drag stroke: flip a cell once each time the pointer enters it, so a drag
+    /// over unmarked cells sets X's and a drag over X's clears them (and a drag
+    /// back over a cell undoes it).
+    fn drag_flip(&mut self, idx: usize, cur: &mut usize) {
+        if *cur == idx {
             return;
         }
-        touched.push(idx);
+        *cur = idx;
         match self.cells[idx] {
             Cell::Empty => self.set_cell(idx, Cell::X),
             Cell::X => self.set_cell(idx, Cell::Empty),
@@ -1093,7 +1094,7 @@ impl App {
             if pressed && response.contains_pointer() {
                 if let Some(pos) = pos {
                     if let Some(origin) = b.cell_at(pos) {
-                        self.drag = Some(Drag { origin, last: pos, painting: false, touched: Vec::new() });
+                        self.drag = Some(Drag { origin, last: pos, painting: false, cur: origin });
                     }
                 }
             }
@@ -1102,17 +1103,14 @@ impl App {
                 if !d.painting && (b.cell_at(pos) != Some(d.origin) || decided) {
                     d.painting = true;
                     // the press already toggled the origin cell (single_click runs on
-                    // press), so treat it as part of the stroke and never flip it twice
-                    if !d.touched.contains(&d.origin) {
-                        d.touched.push(d.origin);
-                    }
+                    // press), so `cur` starts there and it is not flipped twice
                 }
                 if d.painting {
                     let steps = ((pos - d.last).length() / (tile * 0.25)).ceil().max(1.0) as usize;
                     for s in 1..=steps {
                         let q = d.last + (pos - d.last) * (s as f32 / steps as f32);
                         if let Some(i) = b.cell_at(q) {
-                            self.drag_flip(i, &mut d.touched);
+                            self.drag_flip(i, &mut d.cur);
                         }
                     }
                 }

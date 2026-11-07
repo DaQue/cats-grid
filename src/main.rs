@@ -1004,9 +1004,12 @@ impl App {
             ui.add_space(10.0);
         }
 
-        if playing {
-            self.refresh_deductions();
-            let shown = &self.deds;
+        {
+            // always laid out, even when the game is over, so the board keeps its size
+            if playing {
+                self.refresh_deductions();
+            }
+            let shown: &[rules::Deduction] = if playing { &self.deds } else { &[] };
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new("FREE DEDUCTIONS · click one to mark its X's")

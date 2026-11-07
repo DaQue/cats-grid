@@ -81,7 +81,6 @@ struct Search<'a> {
     limit: usize,
     found: Vec<Vec<(usize, usize)>>,
     region_cells: Vec<Vec<(usize, usize)>>,
-    scratch: Vec<usize>,
 }
 
 impl<'a> Search<'a> {
@@ -108,7 +107,6 @@ impl<'a> Search<'a> {
             limit,
             found: Vec::new(),
             region_cells,
-            scratch: Vec::with_capacity(4),
         }
     }
 
@@ -199,9 +197,6 @@ pub fn solutions(
     s.found
 }
 
-pub fn count_solutions(n: usize, region: &[u8], cats: &[(usize, usize)], xs: &[(usize, usize)], limit: usize) -> usize {
-    solutions(n, region, cats, xs, limit).len()
-}
 
 // --------------------------------------------------------------- hints -----
 
@@ -314,6 +309,9 @@ fn starved(
     None
 }
 
+/// Forced-move steps taken, and the unit that ran out of room.
+type Chain = (Vec<String>, String);
+
 /// Play out the moves that are forced after `seed`, using only the counting a
 /// player can do on sight: a unit with one open square has to take it, and a
 /// unit with none is lost. On failure, hand back the chain of forced moves and
@@ -323,7 +321,7 @@ fn propagate(
     region: &[u8],
     seed: &[(usize, usize)],
     color: &dyn Fn(u8) -> &'static str,
-) -> Result<Vec<(usize, usize)>, (Vec<String>, String)> {
+) -> Result<Vec<(usize, usize)>, Chain> {
     let mut cats = seed.to_vec();
     let mut steps: Vec<String> = Vec::new();
     for _ in 0..n * 2 {
@@ -428,7 +426,7 @@ fn unit_verdict(
             Err((_, fail)) => (1, format!("{name} leaves {fail}")),
             Ok(_) => (1, format!("{name} leaves no way to finish the board")),
         };
-        if best.as_ref().map_or(true, |b| score > b.0) {
+        if best.as_ref().is_none_or(|b| score > b.0) {
             best = Some((score, text));
         }
         if score >= 2 {
@@ -595,6 +593,7 @@ fn explain_one(
 /// or colour) is down to its last free square, or a cat anywhere else forces a
 /// chain of moves that leaves some unit with no square left. Player X marks are
 /// ignored on purpose — a hinted proof must never lean on a wrong note.
+#[cfg(test)]
 pub fn explain(
     n: usize,
     region: &[u8],
@@ -620,7 +619,7 @@ pub fn best_hint(
             continue;
         }
         let (score, text) = explain_one(n, region, cats, cell, color);
-        if best.as_ref().map_or(true, |b| score > b.0) {
+        if best.as_ref().is_none_or(|b| score > b.0) {
             best = Some((score, cell, text));
         }
         if score == 3 {
@@ -747,7 +746,6 @@ fn region_connected(n: usize, region: &[u8]) -> bool {
             Some(s) => s,
             None => return false,
         };
-        let mut cells_in_region = 0usize;
         let mut visited = 0usize;
         seen.iter_mut().for_each(|x| *x = false);
         stack.clear();
@@ -765,7 +763,7 @@ fn region_connected(n: usize, region: &[u8]) -> bool {
                 }
             }
         }
-        cells_in_region = region.iter().filter(|&&x| x as usize == g).count();
+        let cells_in_region = region.iter().filter(|&&x| x as usize == g).count();
         if visited != cells_in_region {
             return false;
         }
@@ -826,7 +824,7 @@ pub fn generate(n: usize, seed: u64) -> Option<GenReport> {
             None => continue,
         };
         let mut region = grow_regions(n, &sol, &mut rng);
-        if region.iter().any(|&x| x == u8::MAX) || !region_connected(n, &region) {
+        if region.contains(&u8::MAX) || !region_connected(n, &region) {
             continue;
         }
         let mut sols = solutions(n, &region, &[], &[], 4);

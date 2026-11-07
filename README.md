@@ -14,12 +14,15 @@ Launch **Cats Grid** from the application menu, or run
 - **Double-click** — place a cat. A wrong cat costs a life (red flash and a shake);
   running out of lives ends the run. The first click of a double-click is undone,
   so a cat square only ever shows the cat.
-- **Press, hold and drag** — a stroke toggles every square it enters, once per
-  stroke: dragging over empty squares sets X's, and dragging back over X's clears
-  them again. Cats are never touched.
+- **Press, hold and drag** — a stroke toggles each square every time the pointer
+  enters it: dragging over empty squares sets X's, dragging over X's clears them,
+  and dragging back over a square you just crossed undoes it. Cats are never
+  touched.
 - **Free deductions** — the strip under the board lists up to three one-step
-  deductions you can take right now (biggest win first), e.g. `Row 1 · 9` or
-  `Rose · 7`. One click marks every X that rule implies, and the status line
+  deductions you can take right now (biggest win first, labelled `title · count`),
+  e.g. `Row 1 · 9` or `rose · 7`. The rules are: a row, column or colour that
+  already holds its cat, and the squares around a cat. When a colour rule applies
+  it always gets one of the three slots. One click marks every X that rule implies, and the status line
   explains why ("Row 1 already has its cat in column 10, so the other 9 cells in
   that row must be empty."). Hovering a button shows that reason before you click.
   Only rules that follow from what is already on the board are listed — nothing
@@ -27,19 +30,21 @@ Launch **Cats Grid** from the application menu, or run
 - Cats are verified correct when they land, so clicking a cat does nothing; use
   **Clear marks** to start the board over.
 - **Hint** — explains the next cat, not just where it goes. The card under the board
-  names the deduction: a row, column or colour down to its last free square, or a
-  chain of forced moves ("a cat in column 1 instead would force column 2 to take row
-  4, which leaves the mint region with no square left"). Optional; the button is
-  always available but never forced on you.
+  names the deduction, e.g. "The teal region is down to one free square — row 6,
+  column 5. The rest of it is blocked; for instance column 4 already has its cat in
+  row 1." Optional; never forced on you.
 - **Extra life** — +1 life, usable mid-run or after a game over (max 5).
-- **Clear marks** — wipe the board and start the same puzzle over.
+- **Undo X** — removes X's one at a time, the most recently placed first. It is
+  greyed out when there are no X's and never touches cats.
+- **Clear marks** — removes every X and cat from the board. It is the same puzzle;
+  lives, the timer and the assisted flag carry on.
 - **New game** — new puzzle.
 
 ## Look
 
 Everything is drawn procedurally with egui's painter, with no image assets: a warm paper
-theme, a white board card with a soft shadow, rounded pastel tiles (ten muted
-hues that also differ in lightness, joined by tinted seams inside a region), a
+theme, a white board card with a soft shadow, rounded pastel tiles (ten
+muted hues, joined by tinted seams inside a region), a
 vector cat face that pops in when placed, X marks that fade in, a pulsing amber
 glow on the hint square, paw-print lives, and a "Solved" panel showing the time
 and whether the run was clean. Text uses Fira Sans from `/usr/share/fonts/TTF` when
@@ -69,4 +74,4 @@ cargo test --release      # puzzle rules + generator uniqueness
 ```
 
 Generation plants a legal placement, then nudges region borders until the solver can
-prove that placement is the only solution — typically 1–25 ms per puzzle.
+prove that placement is the only solution — 1–30 ms per puzzle in the ten-seed `--selftest`.

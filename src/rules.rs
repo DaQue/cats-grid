@@ -214,4 +214,16 @@ mod tests {
         let sizes: Vec<usize> = d.iter().map(|x| x.cells.len()).collect();
         assert!(sizes.windows(2).all(|w| w[0] >= w[1]));
     }
+
+    #[test]
+    fn never_lists_a_placed_cat() {
+        let n = 4;
+        let region: Vec<u8> = (0..n * n).map(|i| (i / n) as u8).collect();
+        let cats = [(0, 0), (2, 1)];
+        // a cell is only "empty" when no cat sits on it
+        let d = deductions(n, &region, &cats, &names, &|r, c| !cats.contains(&(r, c)));
+        assert!(!d.is_empty());
+        assert!(d.iter().all(|x| x.cells.iter().all(|cell| !cats.contains(cell))));
+        assert!(d.iter().all(|x| x.cells.len() <= n * n));
+    }
 }

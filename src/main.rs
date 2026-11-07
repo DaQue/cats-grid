@@ -38,7 +38,7 @@ const HINT_EDGE: Color32 = Color32::from_rgb(236, 214, 168);
 const HINT_TITLE: Color32 = Color32::from_rgb(150, 100, 24);
 const HINT_TEXT: Color32 = Color32::from_rgb(64, 50, 26);
 const WRONG: Color32 = Color32::from_rgb(222, 64, 58);
-const X_INK: Color32 = Color32::from_rgb(146, 112, 126);
+const X_INK: Color32 = Color32::from_rgb(58, 40, 52);
 
 // cat
 const CAT_INK: Color32 = Color32::from_rgb(50, 45, 44);
@@ -53,16 +53,16 @@ const CAT_WHISKER: Color32 = Color32::from_rgb(158, 148, 140);
 /// Ten muted pastels, spread over hue *and* lightness so neighbouring regions
 /// stay distinct for colour-blind eyes too. The name is what the hint text says.
 const PALETTE: [(&str, [u8; 3]); 10] = [
-    ("rose", [242, 182, 190]),
-    ("apricot", [247, 201, 160]),
-    ("butter", [244, 228, 156]),
-    ("sage", [196, 216, 160]),
-    ("mint", [166, 221, 199]),
-    ("teal", [128, 191, 194]),
-    ("sky", [184, 214, 242]),
-    ("periwinkle", [156, 168, 222]),
-    ("lilac", [210, 190, 236]),
-    ("plum", [196, 148, 186]),
+    ("rose", [244, 170, 180]),
+    ("apricot", [248, 192, 142]),
+    ("butter", [242, 222, 136]),
+    ("sage", [188, 214, 146]),
+    ("mint", [140, 216, 190]),
+    ("teal", [104, 184, 190]),
+    ("sky", [148, 196, 240]),
+    ("periwinkle", [140, 152, 218]),
+    ("lilac", [198, 174, 234]),
+    ("plum", [190, 130, 182]),
 ];
 
 #[derive(Clone, Copy)]
@@ -315,7 +315,7 @@ fn draw_x(p: &Painter, rect: Rect, t: f32) {
     let e = e * e * (3.0 - 2.0 * e);
     let k = rect.width();
     let h = 0.275 * k * (0.82 + 0.18 * e);
-    let w = (0.075 * k).clamp(2.5, 7.0);
+    let w = (0.085 * k).clamp(2.8, 7.5);
     let col = X_INK.gamma_multiply(0.88 * e);
     let c = rect.center();
     round_line(p, vec![c + Vec2::new(-h, -h), c + Vec2::new(h, h)], w, col);
@@ -436,12 +436,16 @@ struct App {
     game_over: bool,
     ended_at: f64,
     message: String,
+    last_msg: String,
+    last_hint: Option<String>,
+    dumped: bool,
     stats: Stats,
     rx: Option<mpsc::Receiver<Option<puzzle::GenReport>>>,
     wrong: Option<((usize, usize), f64)>,
     gen_ms: Option<u128>,
     /// current egui time, refreshed every frame
     now: f64,
+    last_press: Option<(usize, f64)>,
     drag: Option<Drag>,
     /// last single click: (cell, state before the click) — undone by a double click
     last_click: Option<(usize, Cell)>,
@@ -471,11 +475,15 @@ impl App {
             game_over: false,
             ended_at: 0.0,
             message: String::from("Building a puzzle…"),
+            last_msg: String::new(),
+            last_hint: None,
+            dumped: false,
             stats,
             rx: None,
             wrong: None,
             gen_ms: None,
             now: 0.0,
+            last_press: None,
             drag: None,
             last_click: None,
         };
@@ -526,6 +534,11 @@ impl App {
                     self.cells = vec![Cell::Empty; self.n * self.n];
                     self.changed_at = vec![-10.0; self.n * self.n];
                     self.puzzle = Some(rep.puzzle);
+                    if std::env::var_os("CATS_DEBUG").is_some() {
+                        if let Some(p) = &self.puzzle {
+                            eprintln!("SOLUTION n={} {:?}", p.n, p.solution);
+                        }
+                    }
                     self.start = Some(Instant::now());
                     self.rx = None;
                     self.message = String::from("One cat per row, column and color — none may touch.");
@@ -613,6 +626,9 @@ impl App {
         let cats = self.cats();
         // A legal-looking cat that still admits no completion is a wrong cat.
         if solutions(self.n, &p.region, &cats, &[], 1).is_empty() {
+            if std::env::var_os("CATS_DEBUG").is_some() {
+                eprintln!("REJECT r={} c={} cats={:?} solution={:?}", r, c, cats, p.solution);
+            }
             self.set_cell(idx, Cell::X);
             self.fail_cell(r, c, "no solution is left with a cat there");
             return;
@@ -632,7 +648,12 @@ impl App {
                 String::from("Solved — counted as assisted, not a clean win.")
             };
         } else {
-            self.message = format!("{} cats placed, {} to go.", cats.len(), self.n - cats.len());
+            self.message = format!(
+                "{} cat{} placed, {} to go.",
+                cats.len(),
+                if cats.len() == 1 { "" } else { "s" },
+                self.n - cats.len()
+            );
         }
     }
 
@@ -734,6 +755,11 @@ impl App {
             }
         }
         if self.cells[idx] != Cell::Cat {
+            // The first press of the double click can also have arrived as a
+            // drag-painted X (held a few ms too long), which `last_click` never
+            // saw. The cell is about to hold a cat (or stay empty if the cat is
+            // rejected), so clear any mark here unconditionally.
+            self.cells[idx] = Cell::Empty;
             self.place_cat(idx / self.n, idx % self.n);
         }
     }
@@ -929,6 +955,10 @@ impl App {
         let tile = (inner.width() - gap * (n as f32 - 1.0)) / n as f32;
         let radius = (tile * 0.17).clamp(5.0, 12.0);
         let b = Board { inner, tile, gap, n };
+        if !self.dumped && std::env::var_os("CATS_DEBUG").is_some() {
+            eprintln!("LAYOUT inner={:?} tile={} gap={}", inner, tile, gap);
+            self.dumped = true;
+        }
 
         let response = ui.allocate_rect(card, Sense::click_and_drag());
         let painter = ui.painter().clone();
@@ -1005,12 +1035,39 @@ impl App {
             self.drag = if down { drag } else { None };
 
             if !painted {
-                if let Some(idx) = response.interact_pointer_pos().and_then(|q| b.cell_at(q)) {
-                    if response.double_clicked() {
+                // Clicks are handled from raw press events so a double click is
+                // recognised even when two presses land in the same repaint.
+                let presses: Vec<Pos2> = ctx.input(|i| {
+                    i.events
+                        .iter()
+                        .filter_map(|e| match e {
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed: true,
+                                ..
+                            } => Some(*pos),
+                            _ => None,
+                        })
+                        .collect()
+                });
+                for p in presses {
+                    let at = b.cell_at(p);
+                    if std::env::var_os("CATS_DEBUG").is_some() {
+                        eprintln!("PRESS pos={:?} at={:?} inner={:?}", p, at, b.inner);
+                    }
+                    let Some(idx) = at else { continue };
+                    let dbl = matches!(self.last_press, Some((i, t)) if i == idx && self.now - t < 0.45);
+                    if dbl {
+                        self.last_press = None;
                         self.double_click(idx);
-                    } else if response.clicked() {
+                    } else {
+                        self.last_press = Some((idx, self.now));
                         self.single_click(idx);
-                    } else if response.secondary_clicked() {
+                    }
+                }
+                if let Some(idx) = response.interact_pointer_pos().and_then(|q| b.cell_at(q)) {
+                    if response.secondary_clicked() {
                         // right click kept as a plain X toggle
                         match self.cells[idx] {
                             Cell::Empty => self.set_cell(idx, Cell::X),
@@ -1110,7 +1167,25 @@ impl App {
 
                 let fill = if is_hover { mix(base, Color32::WHITE, 0.16) } else { base };
                 painter.rect_filled(rect, cr(radius), fill);
-                painter.rect_stroke(rect, cr(radius), Stroke::new(1.5, shade(base, 0.85)), StrokeKind::Inside);
+                painter.rect_stroke(rect, cr(radius), Stroke::new(1.0, shade(base, 0.90)), StrokeKind::Inside);
+
+                // Region outline: darken only the tile edges that meet a
+                // different colour, so each region reads as one solid shape.
+                let edge = Stroke::new(2.6, shade(base, 0.66));
+                let inset = 1.0;
+                let (l, t, rr, bb) = (rect.left() + inset, rect.top() + inset, rect.right() - inset, rect.bottom() - inset);
+                if r == 0 || p.region_at(r - 1, c) != g {
+                    painter.line_segment([egui::pos2(l, t), egui::pos2(rr, t)], edge);
+                }
+                if r + 1 == n || p.region_at(r + 1, c) != g {
+                    painter.line_segment([egui::pos2(l, bb), egui::pos2(rr, bb)], edge);
+                }
+                if c == 0 || p.region_at(r, c - 1) != g {
+                    painter.line_segment([egui::pos2(l, t), egui::pos2(l, bb)], edge);
+                }
+                if c + 1 == n || p.region_at(r, c + 1) != g {
+                    painter.line_segment([egui::pos2(rr, t), egui::pos2(rr, bb)], edge);
+                }
 
                 if is_hint {
                     painter.rect_filled(rect, cr(radius), ACCENT.gamma_multiply(0.10 + 0.12 * hint_pulse));
@@ -1158,7 +1233,7 @@ impl App {
                             }
                         }
                         let clip = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-                        draw_cat(&clip, rect.center(), tile * s, 1.0);
+                        draw_cat(&clip, rect.center(), tile * s * 1.07, 1.0);
                     }
                     Cell::X => {
                         if age < 0.2 {
@@ -1239,6 +1314,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
+        if std::env::var_os("CATS_DEBUG").is_some() && (self.message != self.last_msg || self.hint_text != self.last_hint) {
+            eprintln!("MSG={:?} HINT={:?}", self.message, self.hint_text);
+            self.last_msg = self.message.clone();
+            self.last_hint = self.hint_text.clone();
+        }
         self.poll_generator(&ctx);
 
         if self.start.is_some() && !self.won && !self.game_over {

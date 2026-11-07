@@ -255,13 +255,25 @@ fn round_line(p: &Painter, pts: Vec<Pos2>, w: f32, col: Color32) {
 
 // ───────────────────────────── illustrations ─────────────────────────────
 
+/// Fake radial gradient: stacked ellipses from `edge` colour to `core`, the
+/// highlight drifting by `shift` so it reads as a lit, rounded volume.
+fn shaded_ellipse(p: &Painter, c: Pos2, r: Vec2, shift: Vec2, edge: Color32, core: Color32, alpha: f32) {
+    const STEPS: usize = 9;
+    for i in 0..STEPS {
+        let t = i as f32 / (STEPS - 1) as f32;
+        let sc = 1.0 - 0.78 * t;
+        let col = edge.lerp_to_gamma(core, t);
+        p.add(Shape::ellipse_filled(c + shift * t, r * sc, col.gamma_multiply(alpha)));
+    }
+}
+
 /// Hand-drawn cat face, `k` = tile size, roughly 70 % coverage. Callers clip.
 fn draw_cat(p: &Painter, center: Pos2, k: f32, alpha: f32) {
     let a = |c: Color32| c.gamma_multiply(alpha);
     let at = |x: f32, y: f32| center + Vec2::new(x * k, y * k);
 
     // body / shoulders peeking from the bottom, tail curling out of frame
-    p.add(Shape::ellipse_filled(at(0.0, 0.47), Vec2::new(0.27 * k, 0.17 * k), a(CAT_BODY)));
+    shaded_ellipse(p, at(0.0, 0.47), Vec2::new(0.27 * k, 0.17 * k), Vec2::new(0.0, -0.05 * k), CAT_INK, Color32::from_rgb(98, 88, 84), alpha);
     let tail = cubic([at(0.14, 0.40), at(0.44, 0.42), at(0.58, 0.18), at(0.47, -0.10)], 24);
     round_line(p, tail, 0.075 * k, a(CAT_BODY));
 
@@ -278,23 +290,90 @@ fn draw_cat(p: &Painter, center: Pos2, k: f32, alpha: f32) {
     // head
     p.add(Shape::convex_polygon(head_shape(at(0.0, 0.035), 0.305 * k, 0.255 * k), a(CAT_INK), Stroke::NONE));
 
+    // volume: lit crown fading into shadowed jaw
+    shaded_ellipse(
+        p,
+        at(0.0, 0.03),
+        Vec2::new(0.285 * k, 0.235 * k),
+        Vec2::new(0.0, -0.075 * k),
+        CAT_INK.gamma_multiply(0.0),
+        Color32::from_rgb(92, 82, 78),
+        alpha * 0.55,
+    );
+    // fur strands along the head outline
+    let strand = Stroke::new((0.009 * k).max(0.7), a(Color32::from_rgb(86, 77, 73)));
+    for i in 0..22 {
+        let ang = std::f32::consts::PI * (1.05 + 0.9 * i as f32 / 21.0);
+        let (sn, cs) = ang.sin_cos();
+        let base = at(0.0, 0.035) + Vec2::new(cs * 0.29 * k, sn * 0.24 * k);
+        let dir = Vec2::new(cs, sn);
+        let tip = base + dir * (0.035 * k) + Vec2::new(-sn, cs) * (0.012 * k);
+        p.line(vec![base - dir * (0.02 * k), tip], strand);
+    }
+    // dark rims on the head sides and a soft chin shadow
+    p.add(Shape::ellipse_filled(at(0.0, 0.215), Vec2::new(0.11 * k, 0.03 * k), a(Color32::from_rgb(40, 36, 35)).gamma_multiply(0.35)));
+
+    // fur: soft lighter crown, darker cheek edges, tabby forehead stripes
+    let lift = |c: Color32, d: i16| {
+        Color32::from_rgb(
+            (c.r() as i16 + d).clamp(0, 255) as u8,
+            (c.g() as i16 + d).clamp(0, 255) as u8,
+            (c.b() as i16 + d).clamp(0, 255) as u8,
+        )
+    };
+    p.add(Shape::ellipse_filled(at(0.0, -0.075), Vec2::new(0.2 * k, 0.1 * k), a(lift(CAT_INK, 14).gamma_multiply(0.75))));
+    for s in [-1.0f32, 1.0] {
+        p.add(Shape::ellipse_filled(at(0.235 * s, 0.075), Vec2::new(0.06 * k, 0.1 * k), a(lift(CAT_INK, -14).gamma_multiply(0.7))));
+    }
+    let stripe = (0.016 * k).max(1.0);
+    for (dx, len) in [(-0.06f32, 0.07f32), (0.0, 0.095), (0.06, 0.07)] {
+        round_line(
+            p,
+            vec![at(dx, -0.2), at(dx * 0.8, -0.2 + len)],
+            stripe,
+            a(lift(CAT_INK, -20)),
+        );
+    }
+    // fluffy cheek tufts
+    for s in [-1.0f32, 1.0] {
+        let tuft = [at(0.285 * s, 0.1), at(0.33 * s, 0.17), at(0.235 * s, 0.17)];
+        let tuft = if s < 0.0 { tuft } else { [tuft[0], tuft[2], tuft[1]] };
+        p.add(Shape::convex_polygon(rounded_poly(&tuft, 0.3), a(CAT_INK), Stroke::NONE));
+    }
+
     // cream muzzle (two cheeks + chin)
     for s in [-1.0f32, 1.0] {
-        p.add(Shape::ellipse_filled(at(0.068 * s, 0.135), Vec2::new(0.098 * k, 0.074 * k), a(CAT_CREAM)));
+        shaded_ellipse(p, at(0.068 * s, 0.135), Vec2::new(0.098 * k, 0.074 * k), Vec2::new(0.0, -0.012 * k), Color32::from_rgb(214, 196, 172), Color32::from_rgb(252, 244, 230), alpha);
+        for j in 0..3 {
+            let y = 0.12 + 0.02 * j as f32;
+            p.circle_filled(at((0.045 + 0.022 * j as f32) * s, y), (0.0035 * k).max(0.4), a(Color32::from_rgb(170, 150, 130)));
+        }
     }
-    p.add(Shape::ellipse_filled(at(0.0, 0.19), Vec2::new(0.07 * k, 0.05 * k), a(CAT_CREAM)));
+    shaded_ellipse(p, at(0.0, 0.19), Vec2::new(0.07 * k, 0.05 * k), Vec2::new(0.0, -0.01 * k), Color32::from_rgb(214, 196, 172), CAT_CREAM, alpha);
 
     // eyes: amber almond, vertical slit, highlight
     for s in [-1.0f32, 1.0] {
         let e = at(0.125 * s, -0.012);
-        p.add(Shape::ellipse_filled(e, Vec2::new(0.07 * k, 0.06 * k), a(CAT_EYE)));
+        p.add(Shape::ellipse_filled(e, Vec2::new(0.082 * k, 0.07 * k), a(CAT_PUPIL)));
+        p.add(Shape::ellipse_filled(e, Vec2::new(0.072 * k, 0.06 * k), a(Color32::from_rgb(196, 140, 48))));
+        p.add(Shape::ellipse_filled(e + Vec2::new(0.0, -0.008 * k), Vec2::new(0.058 * k, 0.046 * k), a(CAT_EYE)));
+        p.add(Shape::ellipse_filled(e + Vec2::new(0.0, -0.02 * k), Vec2::new(0.04 * k, 0.022 * k), a(Color32::from_rgb(248, 222, 130))));
         p.add(Shape::ellipse_filled(e, Vec2::new(0.017 * k, 0.05 * k), a(CAT_PUPIL)));
+        p.add(Shape::ellipse_filled(e + Vec2::new(0.0, -0.04 * k), Vec2::new(0.07 * k, 0.026 * k), a(Color32::from_rgb(30, 26, 25)).gamma_multiply(0.45)));
+        // upper lid
+        p.line(
+            quad(e + Vec2::new(-0.082 * k, 0.004 * k), e + Vec2::new(0.0, -0.1 * k), e + Vec2::new(0.082 * k, 0.004 * k), 12),
+            Stroke::new((0.014 * k).max(0.9), a(CAT_PUPIL)),
+        );
         p.circle_filled(e + Vec2::new(0.022 * k, -0.022 * k), (0.015 * k).max(0.8), a(Color32::WHITE));
     }
 
     // nose
     let nose = [at(-0.034, 0.078), at(0.034, 0.078), at(0.0, 0.113)];
     p.add(Shape::convex_polygon(rounded_poly(&nose, 0.3), a(CAT_NOSE), Stroke::NONE));
+
+    p.add(Shape::ellipse_filled(at(-0.008, 0.088), Vec2::new(0.012 * k, 0.006 * k), a(Color32::from_rgb(250, 200, 202))));
+    p.add(Shape::ellipse_filled(at(0.0, 0.12), Vec2::new(0.034 * k, 0.008 * k), a(Color32::from_rgb(40, 36, 35)).gamma_multiply(0.18)));
 
     // w-shaped mouth
     let mw = (0.014 * k).max(1.0);
@@ -796,8 +875,27 @@ impl App {
         for (r, c) in cells {
             self.set_cell(r * self.n + c, Cell::X);
         }
-        self.assisted = true;
+        // marking shortcuts only do what the board already proves: not a hit
         self.message = why;
+    }
+
+    /// Right-click on a cat: X every empty cell in its row, column, colour and the squares touching it.
+    fn fan_out(&mut self, idx: usize) {
+        let Some(p) = self.puzzle.clone() else { return };
+        let n = self.n;
+        let (r0, c0) = (idx / n, idx % n);
+        let reg = p.region_at(r0, c0);
+        for r in 0..n {
+            for c in 0..n {
+                let i = r * n + c;
+                let touching = r.abs_diff(r0) <= 1 && c.abs_diff(c0) <= 1;
+                if (r == r0 || c == c0 || touching || p.region_at(r, c) == reg) && self.cells[i] == Cell::Empty {
+                    self.set_cell(i, Cell::X);
+                }
+            }
+        }
+        self.last_click = None;
+        self.message = String::from("Marked that cat's row, column, colour and touching squares.");
     }
 
     fn give_hint(&mut self) {
@@ -856,7 +954,7 @@ impl App {
         self.hint_text = None;
         self.x_log.clear();
         self.last_click = None;
-        self.message = String::from("Marks cleared.");
+        self.message = String::from("Board reset.");
     }
 
     /// Remove the most recently placed X that is still on the board.
@@ -1116,10 +1214,10 @@ impl App {
             ui.add_space(8.0);
         }
 
-        let labels = ["Hint", "Extra life", "Undo X", "Clear marks", "New game"];
+        let labels = ["Hint", "Undo X", "Reset", "New game"];
         let spacing = 10.0;
         let total: f32 =
-            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 3.0 + GROUP_GAP;
+            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 2.0 + GROUP_GAP;
         let avail = ui.available_width();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = spacing;
@@ -1127,14 +1225,11 @@ impl App {
             if pill_button(ui, "Hint", Kind::Tonal, playing).clicked() {
                 self.give_hint();
             }
-            if pill_button(ui, "Extra life", Kind::Tonal, !self.won && self.puzzle.is_some()).clicked() {
-                self.buy_extra_life();
-            }
             let has_x = playing && self.cells.contains(&Cell::X);
             if pill_button(ui, "Undo X", Kind::Tonal, has_x).clicked() {
                 self.undo_x();
             }
-            if pill_button(ui, "Clear marks", Kind::Tonal, !self.won).clicked() {
+            if pill_button(ui, "Reset", Kind::Tonal, !self.won).clicked() {
                 self.clear_marks();
             }
             ui.add_space(GROUP_GAP - spacing);
@@ -1282,8 +1377,11 @@ impl App {
                 }
                 if let Some(idx) = response.interact_pointer_pos().and_then(|q| b.cell_at(q)) {
                     if response.secondary_clicked() {
-                        // right click kept as a plain X toggle
-                        self.toggle_x(idx);
+                        if self.cells[idx] == Cell::Cat {
+                            self.fan_out(idx);
+                        } else {
+                            self.toggle_x(idx);
+                        }
                     }
                 }
             }
@@ -1470,6 +1568,7 @@ impl App {
         }
 
         // ── end-of-run panel ──
+        let mut end_action: Option<bool> = None;
         if self.won || self.game_over {
             let t = (now - self.ended_at) as f32;
             let e = ease_out(t / 0.35);
@@ -1478,7 +1577,7 @@ impl App {
             }
             painter.rect_filled(well, cr(well_r), CARD.gamma_multiply(0.55 * e));
             let w = (well.width() * 0.62).clamp(240.0, 400.0);
-            let h = 188.0f32.min(well.height() * 0.8);
+            let h = (if self.game_over || self.won { 236.0f32 } else { 188.0 }).min(well.height() * 0.9);
             let panel = Rect::from_center_size(
                 well.center() + Vec2::new(0.0, 10.0 * (1.0 - e)),
                 Vec2::new(w, h) * (0.94 + 0.06 * e),
@@ -1507,7 +1606,7 @@ impl App {
                     (format!("Time {time}"), format!("Clean win #{}", self.stats.clean_wins), SAGE)
                 }
             } else {
-                (String::from("Take an extra life, or start a fresh board"), String::new(), INK_SOFT)
+                (String::from("Take an extra life to keep going"), String::new(), INK_SOFT)
             };
             painter.text(
                 Pos2::new(cx, top + 120.0),
@@ -1522,8 +1621,32 @@ impl App {
                 painter.rect_filled(r, cr(13.0), tag_col.gamma_multiply(0.15 * e));
                 painter.galley(r.center() - g.size() * 0.5, g, tag_col.gamma_multiply(e));
             }
+            if self.won && e > 0.95 {
+                let row = Rect::from_center_size(Pos2::new(cx, top + 190.0), Vec2::new(button_width(ui, "New game"), PILL_H));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                if pill_button(&mut child, "New game", Kind::Primary, true).clicked() {
+                    end_action = Some(false);
+                }
+            }
+            if self.game_over && e > 0.95 {
+                let bw = button_width(ui, "Extra life") + button_width(ui, "End game") + 10.0;
+                let row = Rect::from_center_size(Pos2::new(cx, top + 180.0), Vec2::new(bw, PILL_H));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                child.spacing_mut().item_spacing.x = 10.0;
+                if pill_button(&mut child, "Extra life", Kind::Primary, true).clicked() {
+                    end_action = Some(true);
+                }
+                if pill_button(&mut child, "End game", Kind::Tonal, true).clicked() {
+                    end_action = Some(false);
+                }
+            }
         }
 
+        match end_action {
+            Some(true) => self.buy_extra_life(),
+            Some(false) => self.request_new_puzzle(),
+            None => {}
+        }
         if animating {
             ctx.request_repaint();
         }

@@ -1,15 +1,404 @@
 //! Cats Grid — one cat per row, per column, per color, no two touching.
 //! Native desktop build for the G760. Optional hints, extra lives, and a
 //! win counter that only credits clean (unaided) solves.
+//!
+//! Everything on screen is drawn procedurally with egui's `Painter`:
+//! warm "paper" theme, rounded pastel tiles, a vector cat face, paw lives.
 
 mod puzzle;
 mod stats;
 
-use eframe::egui::{self, Color32, CornerRadius, Rect, Sense, Shape, Stroke, Vec2};
+use eframe::egui::{
+    self, epaint::Shadow, Align2, Color32, CornerRadius, FontFamily, FontId, Painter, Pos2, Rect,
+    Sense, Shape, Stroke, StrokeKind, Vec2,
+};
 use puzzle::{solutions, Puzzle, DEFAULT_N};
 use stats::Stats;
+use std::f32::consts::PI;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// ───────────────────────────── theme ─────────────────────────────
+
+const BG: Color32 = Color32::from_rgb(246, 241, 233);
+const CARD: Color32 = Color32::from_rgb(255, 255, 255);
+const WELL: Color32 = Color32::from_rgb(241, 235, 226);
+const HAIRLINE: Color32 = Color32::from_rgb(232, 224, 212);
+const INK: Color32 = Color32::from_rgb(43, 47, 56);
+const INK_SOFT: Color32 = Color32::from_rgb(104, 109, 124);
+const INK_FAINT: Color32 = Color32::from_rgb(160, 158, 160);
+const ACCENT: Color32 = Color32::from_rgb(212, 110, 70);
+const ACCENT_DEEP: Color32 = Color32::from_rgb(182, 86, 52);
+const TONAL: Color32 = Color32::from_rgb(238, 230, 219);
+const TONAL_HOVER: Color32 = Color32::from_rgb(229, 218, 203);
+const SAGE: Color32 = Color32::from_rgb(98, 150, 104);
+const AMBER: Color32 = Color32::from_rgb(206, 146, 52);
+const HINT_CARD: Color32 = Color32::from_rgb(255, 248, 231);
+const HINT_EDGE: Color32 = Color32::from_rgb(236, 214, 168);
+const HINT_TITLE: Color32 = Color32::from_rgb(150, 100, 24);
+const HINT_TEXT: Color32 = Color32::from_rgb(64, 50, 26);
+const WRONG: Color32 = Color32::from_rgb(222, 64, 58);
+const X_INK: Color32 = Color32::from_rgb(146, 112, 126);
+
+// cat
+const CAT_INK: Color32 = Color32::from_rgb(50, 45, 44);
+const CAT_BODY: Color32 = Color32::from_rgb(64, 58, 56);
+const CAT_CREAM: Color32 = Color32::from_rgb(246, 236, 219);
+const CAT_EAR: Color32 = Color32::from_rgb(226, 158, 154);
+const CAT_EYE: Color32 = Color32::from_rgb(236, 186, 80);
+const CAT_PUPIL: Color32 = Color32::from_rgb(28, 25, 24);
+const CAT_NOSE: Color32 = Color32::from_rgb(226, 132, 134);
+const CAT_WHISKER: Color32 = Color32::from_rgb(158, 148, 140);
+
+/// Ten muted pastels, spread over hue *and* lightness so neighbouring regions
+/// stay distinct for colour-blind eyes too. The name is what the hint text says.
+const PALETTE: [(&str, [u8; 3]); 10] = [
+    ("rose", [242, 182, 190]),
+    ("apricot", [247, 201, 160]),
+    ("butter", [244, 228, 156]),
+    ("sage", [196, 216, 160]),
+    ("mint", [166, 221, 199]),
+    ("teal", [128, 191, 194]),
+    ("sky", [184, 214, 242]),
+    ("periwinkle", [156, 168, 222]),
+    ("lilac", [210, 190, 236]),
+    ("plum", [196, 148, 186]),
+];
+
+#[derive(Clone, Copy)]
+enum W {
+    Regular,
+    Semi,
+    Bold,
+}
+
+fn font(size: f32, w: W) -> FontId {
+    let fam = match w {
+        W::Regular => FontFamily::Proportional,
+        W::Semi => FontFamily::Name("semibold".into()),
+        W::Bold => FontFamily::Name("bold".into()),
+    };
+    FontId::new(size, fam)
+}
+
+/// Fira Sans if present; otherwise the named families just alias egui's defaults.
+fn install_fonts(ctx: &egui::Context) {
+    use egui::{FontData, FontDefinitions};
+    use std::sync::Arc;
+    let mut defs = FontDefinitions::default();
+    let base = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let dir = "/usr/share/fonts/TTF";
+    let mut load = |key: &str, file: &str| -> Option<String> {
+        let bytes = std::fs::read(format!("{dir}/{file}")).ok()?;
+        defs.font_data.insert(key.to_owned(), Arc::new(FontData::from_owned(bytes)));
+        Some(key.to_owned())
+    };
+    let regular = load("fira-regular", "FiraSans-Regular.ttf");
+    let semi = load("fira-semibold", "FiraSans-SemiBold.ttf");
+    let bold = load("fira-bold", "FiraSans-Bold.ttf").or_else(|| semi.clone());
+    let semi = semi.or_else(|| bold.clone());
+    let with = |first: Option<String>| {
+        let mut v = base.clone();
+        if let Some(f) = first {
+            v.insert(0, f);
+        }
+        v
+    };
+    defs.families.insert(FontFamily::Proportional, with(regular.clone()));
+    defs.families.insert(FontFamily::Name("semibold".into()), with(semi.or(regular.clone())));
+    defs.families.insert(FontFamily::Name("bold".into()), with(bold.or(regular)));
+    ctx.set_fonts(defs);
+}
+
+fn install_style(ctx: &egui::Context) {
+    use egui::{TextStyle, Theme};
+    ctx.set_theme(Theme::Light);
+    let mut v = egui::Visuals::light();
+    v.panel_fill = BG;
+    v.window_fill = CARD;
+    v.extreme_bg_color = CARD;
+    v.override_text_color = Some(INK);
+    v.window_corner_radius = CornerRadius::same(14);
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+    ctx.set_visuals_of(Theme::Light, v);
+    ctx.all_styles_mut(|s| {
+        s.text_styles.insert(TextStyle::Heading, font(30.0, W::Bold));
+        s.text_styles.insert(TextStyle::Body, font(15.5, W::Regular));
+        s.text_styles.insert(TextStyle::Button, font(13.0, W::Semi));
+        s.text_styles.insert(TextStyle::Small, font(12.5, W::Regular));
+        s.spacing.item_spacing = Vec2::new(8.0, 6.0);
+    });
+}
+
+fn cr(r: f32) -> CornerRadius {
+    CornerRadius::same(r.round().clamp(0.0, 255.0) as u8)
+}
+
+fn rgb(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+fn shade(c: Color32, f: f32) -> Color32 {
+    let m = |v: u8| (v as f32 * f).clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(m(c.r()), m(c.g()), m(c.b()))
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn ease_out_back(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let c1 = 1.9;
+    let c3 = c1 + 1.0;
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+fn soft_shadow(offset_y: i8, blur: u8, spread: u8, alpha: u8) -> Shadow {
+    Shadow {
+        offset: [0, offset_y],
+        blur,
+        spread,
+        color: Color32::from_rgba_unmultiplied(70, 46, 24, alpha),
+    }
+}
+
+// ───────────────────────────── vector helpers ─────────────────────────────
+
+fn quad(a: Pos2, b: Pos2, c: Pos2, n: usize) -> Vec<Pos2> {
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            Pos2::new(
+                u * u * a.x + 2.0 * u * t * b.x + t * t * c.x,
+                u * u * a.y + 2.0 * u * t * b.y + t * t * c.y,
+            )
+        })
+        .collect()
+}
+
+fn cubic(p: [Pos2; 4], n: usize) -> Vec<Pos2> {
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            Pos2::new(
+                a * p[0].x + b * p[1].x + c * p[2].x + d * p[3].x,
+                a * p[0].y + b * p[1].y + c * p[2].y + d * p[3].y,
+            )
+        })
+        .collect()
+}
+
+/// A convex polygon with every corner replaced by a small quadratic arc.
+fn rounded_poly(pts: &[Pos2], frac: f32) -> Vec<Pos2> {
+    let n = pts.len();
+    let mut out = Vec::with_capacity(n * 7);
+    for i in 0..n {
+        let p = pts[i];
+        let prev = pts[(i + n - 1) % n];
+        let next = pts[(i + 1) % n];
+        let a = p + (prev - p) * frac;
+        let b = p + (next - p) * frac;
+        out.extend(quad(a, p, b, 6));
+    }
+    out
+}
+
+/// Superellipse-ish blob (convex), slightly wider at the bottom like cheeks.
+fn head_shape(c: Pos2, rx: f32, ry: f32) -> Vec<Pos2> {
+    let steps = 56;
+    (0..steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32 * 2.0 * PI;
+            let (s, co) = t.sin_cos();
+            let e = 2.0 / 2.35;
+            let x = co.signum() * co.abs().powf(e);
+            let y = s.signum() * s.abs().powf(e);
+            let cheek = 1.0 + 0.06 * s.max(0.0);
+            Pos2::new(c.x + rx * x * cheek, c.y + ry * y)
+        })
+        .collect()
+}
+
+fn round_line(p: &Painter, pts: Vec<Pos2>, w: f32, col: Color32) {
+    if let (Some(&a), Some(&b)) = (pts.first(), pts.last()) {
+        p.circle_filled(a, w * 0.5, col);
+        p.circle_filled(b, w * 0.5, col);
+    }
+    p.line(pts, Stroke::new(w, col));
+}
+
+// ───────────────────────────── illustrations ─────────────────────────────
+
+/// Hand-drawn cat face, `k` = tile size, roughly 70 % coverage. Callers clip.
+fn draw_cat(p: &Painter, center: Pos2, k: f32, alpha: f32) {
+    let a = |c: Color32| c.gamma_multiply(alpha);
+    let at = |x: f32, y: f32| center + Vec2::new(x * k, y * k);
+
+    // body / shoulders peeking from the bottom, tail curling out of frame
+    p.add(Shape::ellipse_filled(at(0.0, 0.47), Vec2::new(0.27 * k, 0.17 * k), a(CAT_BODY)));
+    let tail = cubic([at(0.14, 0.40), at(0.44, 0.42), at(0.58, 0.18), at(0.47, -0.10)], 24);
+    round_line(p, tail, 0.075 * k, a(CAT_BODY));
+
+    // ears
+    for s in [-1.0f32, 1.0] {
+        let outer = [at(0.285 * s, -0.04), at(0.255 * s, -0.355), at(0.055 * s, -0.175)];
+        let outer = if s < 0.0 { outer } else { [outer[0], outer[2], outer[1]] };
+        p.add(Shape::convex_polygon(rounded_poly(&outer, 0.18), a(CAT_INK), Stroke::NONE));
+        let inner = [at(0.235 * s, -0.09), at(0.225 * s, -0.285), at(0.105 * s, -0.17)];
+        let inner = if s < 0.0 { inner } else { [inner[0], inner[2], inner[1]] };
+        p.add(Shape::convex_polygon(rounded_poly(&inner, 0.22), a(CAT_EAR), Stroke::NONE));
+    }
+
+    // head
+    p.add(Shape::convex_polygon(head_shape(at(0.0, 0.035), 0.305 * k, 0.255 * k), a(CAT_INK), Stroke::NONE));
+
+    // cream muzzle (two cheeks + chin)
+    for s in [-1.0f32, 1.0] {
+        p.add(Shape::ellipse_filled(at(0.068 * s, 0.135), Vec2::new(0.098 * k, 0.074 * k), a(CAT_CREAM)));
+    }
+    p.add(Shape::ellipse_filled(at(0.0, 0.19), Vec2::new(0.07 * k, 0.05 * k), a(CAT_CREAM)));
+
+    // eyes: amber almond, vertical slit, highlight
+    for s in [-1.0f32, 1.0] {
+        let e = at(0.125 * s, -0.012);
+        p.add(Shape::ellipse_filled(e, Vec2::new(0.07 * k, 0.06 * k), a(CAT_EYE)));
+        p.add(Shape::ellipse_filled(e, Vec2::new(0.017 * k, 0.05 * k), a(CAT_PUPIL)));
+        p.circle_filled(e + Vec2::new(0.022 * k, -0.022 * k), (0.015 * k).max(0.8), a(Color32::WHITE));
+    }
+
+    // nose
+    let nose = [at(-0.034, 0.078), at(0.034, 0.078), at(0.0, 0.113)];
+    p.add(Shape::convex_polygon(rounded_poly(&nose, 0.3), a(CAT_NOSE), Stroke::NONE));
+
+    // w-shaped mouth
+    let mw = (0.014 * k).max(1.0);
+    let ink = Stroke::new(mw, a(CAT_INK));
+    p.line(vec![at(0.0, 0.11), at(0.0, 0.135)], ink);
+    for s in [-1.0f32, 1.0] {
+        p.line(quad(at(0.0, 0.135), at(0.022 * s, 0.172), at(0.062 * s, 0.142), 10), ink);
+    }
+
+    // whiskers, three per side
+    let ww = (0.0105 * k).max(0.9);
+    for s in [-1.0f32, 1.0] {
+        for (i, dy) in [-0.034f32, 0.0, 0.034].iter().enumerate() {
+            let tilt = (i as f32 - 1.0) * 0.045;
+            let start = at(0.14 * s, 0.128 + dy);
+            let ctrl = at(0.31 * s, 0.112 + dy + tilt * 0.5);
+            let end = at(0.45 * s, 0.096 + dy * 1.4 + tilt);
+            p.line(quad(start, ctrl, end, 10), Stroke::new(ww, a(CAT_WHISKER)));
+        }
+    }
+}
+
+/// Simple paw print, `s` = overall size.
+fn draw_paw(p: &Painter, c: Pos2, s: f32, col: Color32) {
+    p.add(Shape::ellipse_filled(c + Vec2::new(0.0, 0.17 * s), Vec2::new(0.27 * s, 0.22 * s), col));
+    for (x, y) in [(-0.34, -0.10), (-0.13, -0.30), (0.13, -0.30), (0.34, -0.10)] {
+        p.add(Shape::ellipse_filled(c + Vec2::new(x * s, y * s), Vec2::new(0.115 * s, 0.135 * s), col));
+    }
+}
+
+fn draw_x(p: &Painter, rect: Rect, t: f32) {
+    // ease-in so the X of a double-click's first click barely shows
+    let e = (t / 0.16).clamp(0.0, 1.0);
+    let e = e * e * (3.0 - 2.0 * e);
+    let k = rect.width();
+    let h = 0.275 * k * (0.82 + 0.18 * e);
+    let w = (0.075 * k).clamp(2.5, 7.0);
+    let col = X_INK.gamma_multiply(0.88 * e);
+    let c = rect.center();
+    round_line(p, vec![c + Vec2::new(-h, -h), c + Vec2::new(h, h)], w, col);
+    round_line(p, vec![c + Vec2::new(h, -h), c + Vec2::new(-h, h)], w, col);
+}
+
+fn draw_info_icon(p: &Painter, c: Pos2, r: f32) {
+    p.circle_filled(c, r, AMBER);
+    p.circle_filled(c + Vec2::new(0.0, -r * 0.45), r * 0.14, Color32::WHITE);
+    p.line(
+        vec![c + Vec2::new(0.0, -r * 0.12), c + Vec2::new(0.0, r * 0.5)],
+        Stroke::new(r * 0.24, Color32::WHITE),
+    );
+}
+
+// ───────────────────────────── widgets ─────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Primary,
+    Tonal,
+}
+
+fn button_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter().layout_no_wrap(text.to_owned(), font(13.0, W::Semi), INK).size().x + 32.0
+}
+
+fn pill_button(ui: &mut egui::Ui, text: &str, kind: Kind, enabled: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font(13.0, W::Semi), INK);
+    let size = Vec2::new(galley.size().x + 32.0, 36.0);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let hovered = enabled && resp.hovered();
+    let pressed = enabled && resp.is_pointer_button_down_on();
+    let rect = if pressed { rect.translate(Vec2::new(0.0, 1.0)) } else { rect };
+    let p = ui.painter();
+    let (fill, text_col) = match kind {
+        Kind::Primary => (if hovered { ACCENT_DEEP } else { ACCENT }, Color32::WHITE),
+        Kind::Tonal => (if hovered { TONAL_HOVER } else { TONAL }, INK),
+    };
+    let fade = if enabled { 1.0 } else { 0.45 };
+    if kind == Kind::Primary && enabled && !pressed {
+        p.add(Shadow {
+            offset: [0, 3],
+            blur: 10,
+            spread: 0,
+            color: Color32::from_rgba_unmultiplied(182, 86, 52, 70),
+        }
+        .as_shape(rect, cr(11.0)));
+    }
+    p.rect_filled(rect, cr(11.0), fill.gamma_multiply(fade));
+    let pos = rect.center() - galley.size() * 0.5;
+    p.galley(pos, galley, text_col.gamma_multiply(fade));
+    if enabled {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
+}
+
+/// Quiet stat chip: coloured dot, small label, semibold value.
+fn chip(ui: &mut egui::Ui, dot: Option<Color32>, label: &str, value: &str) {
+    let p = ui.painter();
+    let lg = p.layout_no_wrap(label.to_owned(), font(12.5, W::Regular), INK_SOFT);
+    let vg = p.layout_no_wrap(value.to_owned(), font(13.5, W::Semi), INK);
+    let dot_w = if dot.is_some() { 14.0 } else { 0.0 };
+    let w = 12.0 + dot_w + lg.size().x + 6.0 + vg.size().x + 12.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, cr(14.0), CARD);
+    p.rect_stroke(rect, cr(14.0), Stroke::new(1.0, HAIRLINE), StrokeKind::Inside);
+    let mut x = rect.left() + 12.0;
+    if let Some(d) = dot {
+        p.circle_filled(Pos2::new(x + 4.0, rect.center().y), 4.0, d);
+        x += dot_w;
+    }
+    let lw = lg.size().x;
+    p.galley(Pos2::new(x, rect.center().y - lg.size().y * 0.5), lg, INK_SOFT);
+    x += lw + 6.0;
+    p.galley(Pos2::new(x, rect.center().y - vg.size().y * 0.5), vg, INK);
+}
+
+// ───────────────────────────── app state ─────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cell {
@@ -18,14 +407,23 @@ enum Cell {
     X,
 }
 
+/// A press on the board that may turn into an X-painting drag.
+struct Drag {
+    origin: usize,
+    last: Pos2,
+    painting: bool,
+}
+
 struct App {
     n: usize,
     puzzle: Option<Puzzle>,
     cells: Vec<Cell>,
+    /// egui time of each cell's last change (drives pop / fade animations)
+    changed_at: Vec<f64>,
     lives: u8,
     max_lives: u8,
     hint: Option<(usize, usize)>,
-    hint_at: Option<Instant>,
+    hint_at: Option<f64>,
     /// the spoken deduction behind the current hint
     hint_text: Option<String>,
     /// true as soon as a hint or an extra life is used — kills the clean run
@@ -36,20 +434,29 @@ struct App {
     elapsed: Duration,
     won: bool,
     game_over: bool,
+    ended_at: f64,
     message: String,
     stats: Stats,
     rx: Option<mpsc::Receiver<Option<puzzle::GenReport>>>,
-    wrong: Option<((usize, usize), Instant)>,
+    wrong: Option<((usize, usize), f64)>,
     gen_ms: Option<u128>,
+    /// current egui time, refreshed every frame
+    now: f64,
+    drag: Option<Drag>,
+    /// last single click: (cell, state before the click) — undone by a double click
+    last_click: Option<(usize, Cell)>,
 }
 
 impl App {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_fonts(&cc.egui_ctx);
+        install_style(&cc.egui_ctx);
         let stats = Stats::load();
         let mut app = App {
             n: DEFAULT_N,
             puzzle: None,
             cells: vec![Cell::Empty; DEFAULT_N * DEFAULT_N],
+            changed_at: vec![-10.0; DEFAULT_N * DEFAULT_N],
             lives: 3,
             max_lives: 3,
             hint: None,
@@ -62,11 +469,15 @@ impl App {
             elapsed: Duration::ZERO,
             won: false,
             game_over: false,
+            ended_at: 0.0,
             message: String::from("Building a puzzle…"),
             stats,
             rx: None,
             wrong: None,
             gen_ms: None,
+            now: 0.0,
+            drag: None,
+            last_click: None,
         };
         app.request_new_puzzle();
         app
@@ -85,6 +496,7 @@ impl App {
         self.rx = Some(rx);
         self.puzzle = None;
         self.cells = vec![Cell::Empty; self.n * self.n];
+        self.changed_at = vec![-10.0; self.n * self.n];
         self.lives = self.max_lives;
         self.hint = None;
         self.hint_text = None;
@@ -97,6 +509,8 @@ impl App {
         self.game_over = false;
         self.wrong = None;
         self.gen_ms = None;
+        self.drag = None;
+        self.last_click = None;
         self.message = String::from("Building a puzzle…");
         self.stats.games_started += 1;
         self.stats.save();
@@ -110,6 +524,7 @@ impl App {
                     self.gen_ms = Some(rep.elapsed.as_millis());
                     self.n = rep.puzzle.n;
                     self.cells = vec![Cell::Empty; self.n * self.n];
+                    self.changed_at = vec![-10.0; self.n * self.n];
                     self.puzzle = Some(rep.puzzle);
                     self.start = Some(Instant::now());
                     self.rx = None;
@@ -130,6 +545,13 @@ impl App {
             }
         }
         ready
+    }
+
+    fn set_cell(&mut self, idx: usize, v: Cell) {
+        if self.cells[idx] != v {
+            self.cells[idx] = v;
+            self.changed_at[idx] = self.now;
+        }
     }
 
     fn cats(&self) -> Vec<(usize, usize)> {
@@ -187,11 +609,11 @@ impl App {
             self.fail_cell(r, c, why);
             return;
         }
-        self.cells[idx] = Cell::Cat;
+        self.set_cell(idx, Cell::Cat);
         let cats = self.cats();
         // A legal-looking cat that still admits no completion is a wrong cat.
         if solutions(self.n, &p.region, &cats, &[], 1).is_empty() {
-            self.cells[idx] = Cell::X;
+            self.set_cell(idx, Cell::X);
             self.fail_cell(r, c, "no solution is left with a cat there");
             return;
         }
@@ -199,6 +621,7 @@ impl App {
         self.hint_text = None;
         if cats.len() == self.n {
             self.won = true;
+            self.ended_at = self.now;
             self.elapsed = self.start.map(|s| s.elapsed()).unwrap_or_default();
             let ms = self.elapsed.as_millis() as u64;
             let clean = !self.assisted;
@@ -214,7 +637,7 @@ impl App {
     }
 
     fn fail_cell(&mut self, r: usize, c: usize, why: &str) {
-        self.wrong = Some(((r, c), Instant::now()));
+        self.wrong = Some(((r, c), self.now));
         if self.lives > 0 {
             self.lives -= 1;
         }
@@ -222,13 +645,11 @@ impl App {
         self.hint_text = None;
         if self.lives == 0 {
             self.game_over = true;
+            self.ended_at = self.now;
             self.elapsed = self.start.map(|s| s.elapsed()).unwrap_or_default();
             self.message = format!("Out of lives — {}.", why);
         } else {
-            self.message = format!(
-                "Not a cat: {}. Lost a life ({} left).",
-                why, self.lives
-            );
+            self.message = format!("Not a cat: {}. Lost a life ({} left).", why, self.lives);
         }
     }
 
@@ -251,19 +672,14 @@ impl App {
             return;
         }
         let sol = with_xs[0].clone();
-        let Some((target, why)) = puzzle::best_hint(
-            self.n,
-            &p.region,
-            &cats,
-            &sol,
-            &|g| color_name(g, self.n),
-        ) else {
+        let Some((target, why)) = puzzle::best_hint(self.n, &p.region, &cats, &sol, &|g| color_name(g, self.n))
+        else {
             return;
         };
         self.assisted = true;
         self.hints_used += 1;
         self.hint = Some(target);
-        self.hint_at = Some(Instant::now());
+        self.hint_at = Some(self.now);
         self.hint_text = Some(why);
         self.message = format!("Next cat: row {}, column {}.", target.0 + 1, target.1 + 1);
     }
@@ -286,12 +702,47 @@ impl App {
         if self.won {
             return;
         }
-        for cell in self.cells.iter_mut() {
-            *cell = Cell::Empty;
+        for i in 0..self.cells.len() {
+            self.set_cell(i, Cell::Empty);
         }
         self.hint = None;
         self.hint_text = None;
+        self.last_click = None;
         self.message = String::from("Marks cleared.");
+    }
+
+    // ── mouse model ──
+
+    /// Single click: toggle an X. Cats are proven correct when placed, so a
+    /// single click leaves them alone.
+    fn single_click(&mut self, idx: usize) {
+        let prev = self.cells[idx];
+        match prev {
+            Cell::Empty => self.set_cell(idx, Cell::X),
+            Cell::X => self.set_cell(idx, Cell::Empty),
+            Cell::Cat => {}
+        }
+        self.last_click = Some((idx, prev));
+    }
+
+    /// Double click: egui reports the first click on its own a moment earlier,
+    /// so undo that toggle first, then place the cat.
+    fn double_click(&mut self, idx: usize) {
+        if let Some((li, prev)) = self.last_click.take() {
+            if li == idx {
+                self.cells[idx] = prev;
+            }
+        }
+        if self.cells[idx] != Cell::Cat {
+            self.place_cat(idx / self.n, idx % self.n);
+        }
+    }
+
+    /// Drag-painting only ever adds X marks to empty cells.
+    fn paint_x(&mut self, idx: usize) {
+        if self.cells[idx] == Cell::Empty {
+            self.set_cell(idx, Cell::X);
+        }
     }
 }
 
@@ -300,106 +751,494 @@ fn fmt_time(ms: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// Pastel palette from evenly spaced hues; stable per region.
-fn region_color(g: u8, n: usize) -> Color32 {
-    let hue = (g as f32 * 360.0 / n as f32 + 12.0) % 360.0;
-    hsv(hue, 0.34, 0.96)
+fn region_color(g: u8, _n: usize) -> Color32 {
+    rgb(PALETTE[g as usize % PALETTE.len()].1)
 }
 
-fn color_name(g: u8, n: usize) -> &'static str {
-    let hue = (g as f32 * 360.0 / n as f32 + 12.0) % 360.0;
-    match hue as u32 {
-        0..=14 => "pink",
-        15..=44 => "apricot",
-        45..=74 => "butter",
-        75..=104 => "lime",
-        105..=134 => "mint",
-        135..=164 => "green",
-        165..=194 => "teal",
-        195..=224 => "sky",
-        225..=254 => "blue",
-        255..=284 => "violet",
-        285..=314 => "lilac",
-        315..=344 => "rose",
-        _ => "coral",
+fn color_name(g: u8, _n: usize) -> &'static str {
+    PALETTE[g as usize % PALETTE.len()].0
+}
+
+/// Board geometry inside the card.
+struct Board {
+    inner: Rect,
+    tile: f32,
+    gap: f32,
+    n: usize,
+}
+
+impl Board {
+    fn rect(&self, r: usize, c: usize) -> Rect {
+        let step = self.tile + self.gap;
+        Rect::from_min_size(
+            self.inner.min + Vec2::new(c as f32 * step, r as f32 * step),
+            Vec2::splat(self.tile),
+        )
+    }
+
+    fn cell_at(&self, p: Pos2) -> Option<usize> {
+        if !self.inner.expand(self.gap * 0.5).contains(p) {
+            return None;
+        }
+        let step = self.tile + self.gap;
+        let f = |v: f32| ((v / step).floor() as isize).clamp(0, self.n as isize - 1) as usize;
+        let c = f(p.x - self.inner.min.x + self.gap * 0.5);
+        let r = f(p.y - self.inner.min.y + self.gap * 0.5);
+        Some(r * self.n + c)
     }
 }
 
-fn hsv(h: f32, s: f32, v: f32) -> Color32 {
-    let c = v * s;
-    let hp = (h % 360.0) / 60.0;
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r1, g1, b1) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = v - c;
-    Color32::from_rgb(
-        ((r1 + m) * 255.0) as u8,
-        ((g1 + m) * 255.0) as u8,
-        ((b1 + m) * 255.0) as u8,
-    )
-}
+// ───────────────────────────── UI ─────────────────────────────
 
-fn draw_cat(p: &egui::Painter, cell: Rect) {
-    let ink = Color32::from_rgb(48, 42, 55);
-    let k = cell.width();
-    let c = cell.center() + Vec2::new(0.0, k * 0.03);
-    let head = k * 0.235;
-    // ears
-    p.add(Shape::convex_polygon(
-        vec![
-            c + Vec2::new(-head * 0.95, -head * 0.55),
-            c + Vec2::new(-head * 1.02, -head * 1.55),
-            c + Vec2::new(-head * 0.18, -head * 0.98),
-        ],
-        ink,
-        Stroke::NONE,
-    ));
-    p.add(Shape::convex_polygon(
-        vec![
-            c + Vec2::new(head * 0.95, -head * 0.55),
-            c + Vec2::new(head * 1.02, -head * 1.55),
-            c + Vec2::new(head * 0.18, -head * 0.98),
-        ],
-        ink,
-        Stroke::NONE,
-    ));
-    p.circle_filled(c, head, ink);
-    // eyes
-    let eye = Color32::from_rgb(240, 232, 190);
-    p.circle_filled(c + Vec2::new(-head * 0.38, -head * 0.08), head * 0.17, eye);
-    p.circle_filled(c + Vec2::new(head * 0.38, -head * 0.08), head * 0.17, eye);
-    // nose + whiskers
-    p.add(Shape::convex_polygon(
-        vec![
-            c + Vec2::new(0.0, head * 0.12),
-            c + Vec2::new(-head * 0.12, head * 0.28),
-            c + Vec2::new(head * 0.12, head * 0.28),
-        ],
-        Color32::from_rgb(235, 160, 170),
-        Stroke::NONE,
-    ));
-    let whisker = Stroke::new((k * 0.014).max(1.0), ink);
-    for dy in [-0.10, 0.06] {
-        p.line_segment(
-            [c + Vec2::new(head * 0.35, head * (0.30 + dy)), c + Vec2::new(head * 1.38, head * (0.16 + dy))],
-            whisker,
+impl App {
+    fn header(&mut self, ui: &mut egui::Ui) {
+        let wide = ui.available_width() > 760.0;
+        ui.horizontal(|ui| {
+            // badge
+            let (badge, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+            let p = ui.painter();
+            p.add(soft_shadow(2, 8, 0, 40).as_shape(badge, cr(12.0)));
+            p.rect_filled(badge, cr(12.0), ACCENT);
+            draw_cat(&p.with_clip_rect(badge.shrink(1.0)), badge.center() + Vec2::new(0.0, 1.0), 40.0, 1.0);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Cats Grid").font(font(30.0, W::Bold)).color(INK));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if wide {
+                    if let Some(best) = self.stats.best_clean_ms {
+                        chip(ui, None, "best", &fmt_time(best));
+                    }
+                }
+                chip(ui, Some(AMBER), "assisted", &self.stats.assisted_wins.to_string());
+                chip(ui, Some(SAGE), "clean", &self.stats.clean_wins.to_string());
+            });
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(2.0);
+            // paws
+            let slots = self.lives.max(self.max_lives) as usize;
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(slots as f32 * 24.0, 24.0), Sense::hover());
+            let p = ui.painter();
+            for i in 0..slots {
+                let c = Pos2::new(rect.left() + 12.0 + i as f32 * 24.0, rect.center().y);
+                let col = if i < self.lives as usize { ACCENT } else { INK_FAINT.gamma_multiply(0.35) };
+                draw_paw(p, c, 18.0, col);
+            }
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("lives").font(font(12.5, W::Regular)).color(INK_SOFT));
+            ui.add_space(14.0);
+            chip(ui, None, "time", &fmt_time(self.elapsed.as_millis() as u64));
+            if self.assisted {
+                ui.add_space(4.0);
+                let g = ui.painter().layout_no_wrap("assisted run".into(), font(12.5, W::Semi), AMBER);
+                let (r, _) = ui.allocate_exact_size(g.size() + Vec2::new(20.0, 10.0), Sense::hover());
+                ui.painter().rect_filled(r, cr(12.0), AMBER.gamma_multiply(0.14));
+                ui.painter().galley(r.center() - g.size() * 0.5, g, AMBER);
+            }
+        });
+    }
+
+    fn controls(&mut self, ui: &mut egui::Ui) {
+        let playing = !self.won && !self.game_over && self.puzzle.is_some();
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new(&self.message).font(font(15.5, W::Regular)).color(INK));
+        });
+        ui.add_space(8.0);
+
+        if let Some(text) = self.hint_text.clone() {
+            let avail = ui.available_width();
+            let w = avail.min(760.0);
+            ui.horizontal(|ui| {
+                ui.add_space(((avail - w) * 0.5).max(0.0));
+                ui.vertical(|ui| {
+                    ui.set_width(w);
+                    egui::Frame::new()
+                        .fill(HINT_CARD)
+                        .stroke(Stroke::new(1.0, HINT_EDGE))
+                        .corner_radius(cr(14.0))
+                        .shadow(soft_shadow(2, 6, 0, 26))
+                        .inner_margin(egui::Margin::symmetric(14, 11))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal_top(|ui| {
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                                draw_info_icon(ui.painter(), r.center(), 11.0);
+                                ui.add_space(4.0);
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(
+                                        egui::RichText::new("WHY THIS CAT")
+                                            .font(font(12.0, W::Semi))
+                                            .color(HINT_TITLE),
+                                    );
+                                    ui.label(egui::RichText::new(text).font(font(15.0, W::Regular)).color(HINT_TEXT));
+                                });
+                            });
+                        });
+                });
+            });
+            ui.add_space(10.0);
+        }
+
+        let labels = ["Hint", "Extra life", "Clear marks", "New game"];
+        let spacing = 10.0;
+        let total: f32 =
+            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 2.0 + 22.0;
+        let avail = ui.available_width();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = spacing;
+            ui.add_space(((avail - total) * 0.5).max(0.0));
+            if pill_button(ui, "Hint", Kind::Tonal, playing).clicked() {
+                self.give_hint();
+            }
+            if pill_button(ui, "Extra life", Kind::Tonal, !self.won && self.puzzle.is_some()).clicked() {
+                self.buy_extra_life();
+            }
+            if pill_button(ui, "Clear marks", Kind::Tonal, !self.won).clicked() {
+                self.clear_marks();
+            }
+            ui.add_space(22.0 - spacing);
+            if pill_button(ui, "New game", Kind::Primary, true).clicked() {
+                self.request_new_puzzle();
+            }
+        });
+        ui.add_space(8.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new("Click: mark X   ·   Double-click: place a cat   ·   Drag: paint X marks")
+                    .font(font(12.5, W::Regular))
+                    .color(INK_SOFT),
+            );
+        });
+    }
+
+    fn board(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let now = self.now;
+        let full = ui.max_rect();
+        let avail = full.shrink2(Vec2::new(16.0, 10.0));
+        let side = avail.width().min(avail.height()).max(160.0);
+        let card = Rect::from_center_size(avail.center(), Vec2::splat(side));
+        let pad = (side * 0.04).clamp(12.0, 26.0);
+        let well = card.shrink(pad);
+        let wpad = (side * 0.014).clamp(4.0, 9.0);
+        let inner = well.shrink(wpad);
+        let n = self.n;
+        let gap = (inner.width() / n as f32 * 0.075).clamp(3.5, 6.0);
+        let tile = (inner.width() - gap * (n as f32 - 1.0)) / n as f32;
+        let radius = (tile * 0.17).clamp(5.0, 12.0);
+        let b = Board { inner, tile, gap, n };
+
+        let response = ui.allocate_rect(card, Sense::click_and_drag());
+        let painter = ui.painter().clone();
+
+        // card + well
+        painter.add(soft_shadow(10, 34, 0, 34).as_shape(card, cr(18.0)));
+        painter.add(soft_shadow(1, 3, 0, 18).as_shape(card, cr(18.0)));
+        painter.rect_filled(card, cr(18.0), CARD);
+        let well_r = (18.0 - pad * 0.5).max(10.0);
+        painter.rect_filled(well, cr(well_r), WELL);
+        painter.rect_stroke(
+            well,
+            cr(well_r),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(90, 60, 30, 12)),
+            StrokeKind::Inside,
         );
-        p.line_segment(
-            [c + Vec2::new(-head * 0.35, head * (0.30 + dy)), c + Vec2::new(-head * 1.38, head * (0.16 + dy))],
-            whisker,
-        );
+
+        let Some(p) = self.puzzle.clone() else {
+            painter.text(
+                well.center() - Vec2::new(0.0, 14.0),
+                Align2::CENTER_CENTER,
+                "Building a puzzle…",
+                font(20.0, W::Semi),
+                INK_SOFT,
+            );
+            for i in 0..3 {
+                let ph = ((now as f32 * 3.0) - i as f32 * 0.6).sin() * 0.5 + 0.5;
+                painter.circle_filled(
+                    well.center() + Vec2::new((i as f32 - 1.0) * 16.0, 18.0),
+                    3.0 + ph * 2.0,
+                    ACCENT.gamma_multiply(0.35 + 0.65 * ph),
+                );
+            }
+            ctx.request_repaint_after(Duration::from_millis(33));
+            return;
+        };
+
+        // ── input ──
+        let active = !self.won && !self.game_over;
+        if active {
+            let (pressed, down, pos, decided) = ctx.input(|i| {
+                (
+                    i.pointer.primary_pressed(),
+                    i.pointer.primary_down(),
+                    i.pointer.interact_pos(),
+                    i.pointer.is_decidedly_dragging(),
+                )
+            });
+            if pressed && response.contains_pointer() {
+                if let Some(pos) = pos {
+                    if let Some(origin) = b.cell_at(pos) {
+                        self.drag = Some(Drag { origin, last: pos, painting: false });
+                    }
+                }
+            }
+            let mut drag = self.drag.take();
+            if let (Some(d), true, Some(pos)) = (drag.as_mut(), down, pos) {
+                if !d.painting && (b.cell_at(pos) != Some(d.origin) || decided) {
+                    d.painting = true;
+                    self.paint_x(d.origin);
+                }
+                if d.painting {
+                    let steps = ((pos - d.last).length() / (tile * 0.25)).ceil().max(1.0) as usize;
+                    for s in 1..=steps {
+                        let q = d.last + (pos - d.last) * (s as f32 / steps as f32);
+                        if let Some(i) = b.cell_at(q) {
+                            self.paint_x(i);
+                        }
+                    }
+                }
+                d.last = pos;
+            }
+            let painted = drag.as_ref().is_some_and(|d| d.painting);
+            self.drag = if down { drag } else { None };
+
+            if !painted {
+                if let Some(idx) = response.interact_pointer_pos().and_then(|q| b.cell_at(q)) {
+                    if response.double_clicked() {
+                        self.double_click(idx);
+                    } else if response.clicked() {
+                        self.single_click(idx);
+                    } else if response.secondary_clicked() {
+                        // right click kept as a plain X toggle
+                        match self.cells[idx] {
+                            Cell::Empty => self.set_cell(idx, Cell::X),
+                            Cell::X => self.set_cell(idx, Cell::Empty),
+                            Cell::Cat => {}
+                        }
+                    }
+                }
+            }
+        } else {
+            self.drag = None;
+        }
+        let active = !self.won && !self.game_over;
+        let hovered = if active { response.hover_pos().and_then(|q| b.cell_at(q)) } else { None };
+        if hovered.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        // ── same-region connectors (drawn under the tiles) ──
+        for r in 0..n {
+            for c in 0..n {
+                let g = p.region_at(r, c);
+                let col = shade(region_color(g, n), 0.9);
+                let a = b.rect(r, c);
+                if c + 1 < n && p.region_at(r, c + 1) == g {
+                    let nb = b.rect(r, c + 1);
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            Pos2::new(a.right() - 1.0, a.top() + radius),
+                            Pos2::new(nb.left() + 1.0, a.bottom() - radius),
+                        ),
+                        CornerRadius::ZERO,
+                        col,
+                    );
+                }
+                if r + 1 < n && p.region_at(r + 1, c) == g {
+                    let nb = b.rect(r + 1, c);
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            Pos2::new(a.left() + radius, a.bottom() - 1.0),
+                            Pos2::new(a.right() - radius, nb.top() + 1.0),
+                        ),
+                        CornerRadius::ZERO,
+                        col,
+                    );
+                }
+            }
+        }
+
+        // ── glows / lift shadows, under every tile so neighbours don't clip them ──
+        let lift = Vec2::new(0.0, -1.5);
+        let hint_pulse = self.hint_at.map(|t| ((now - t) as f32 * 3.4).sin() * 0.5 + 0.5).unwrap_or(0.0);
+        if let Some((hr, hc)) = self.hint {
+            painter.add(
+                Shadow {
+                    offset: [0, 0],
+                    blur: 18,
+                    spread: (2.0 + hint_pulse * 4.0) as u8,
+                    color: Color32::from_rgba_unmultiplied(232, 140, 60, (90.0 + 90.0 * hint_pulse) as u8),
+                }
+                .as_shape(b.rect(hr, hc), cr(radius)),
+            );
+        }
+        if let Some(h) = hovered {
+            painter.add(soft_shadow(3, 10, 0, 46).as_shape(b.rect(h / n, h % n).translate(lift), cr(radius)));
+        }
+
+        // ── tiles ──
+        let mut animating = false;
+        for r in 0..n {
+            for c in 0..n {
+                let idx = r * n + c;
+                let g = p.region_at(r, c);
+                let base = region_color(g, n);
+                let mut rect = b.rect(r, c);
+                let is_hover = hovered == Some(idx);
+                let is_hint = self.hint == Some((r, c));
+
+                // wrong-cat shake
+                let mut flash = 0.0;
+                if let Some(((wr, wc), t)) = self.wrong {
+                    if (wr, wc) == (r, c) {
+                        let dt = (now - t) as f32;
+                        if dt < 0.7 {
+                            animating = true;
+                            flash = 1.0 - dt / 0.7;
+                            if dt < 0.42 {
+                                let amp = tile * 0.05 * (1.0 - dt / 0.42);
+                                rect = rect.translate(Vec2::new((dt * 52.0).sin() * amp, 0.0));
+                            }
+                        }
+                    }
+                }
+                if is_hover {
+                    rect = rect.translate(lift);
+                }
+
+                let fill = if is_hover { mix(base, Color32::WHITE, 0.16) } else { base };
+                painter.rect_filled(rect, cr(radius), fill);
+                painter.rect_stroke(rect, cr(radius), Stroke::new(1.5, shade(base, 0.85)), StrokeKind::Inside);
+
+                if is_hint {
+                    painter.rect_filled(rect, cr(radius), ACCENT.gamma_multiply(0.10 + 0.12 * hint_pulse));
+                    painter.rect_stroke(
+                        rect.expand(1.5 + hint_pulse * 1.5),
+                        cr(radius + 2.0),
+                        Stroke::new(2.5, ACCENT.gamma_multiply(0.75 + 0.25 * hint_pulse)),
+                        StrokeKind::Outside,
+                    );
+                }
+                if flash > 0.0 {
+                    painter.rect_filled(rect, cr(radius), WRONG.gamma_multiply(0.6 * flash));
+                }
+                if is_hover {
+                    painter.rect_stroke(
+                        rect,
+                        cr(radius),
+                        Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 255, 255, 230)),
+                        StrokeKind::Outside,
+                    );
+                    painter.rect_stroke(
+                        rect.expand(2.0),
+                        cr(radius + 2.0),
+                        Stroke::new(1.0, INK.gamma_multiply(0.18)),
+                        StrokeKind::Outside,
+                    );
+                }
+
+                let age = (now - self.changed_at[idx]) as f32;
+                match self.cells[idx] {
+                    Cell::Cat => {
+                        let mut s = if age < 0.18 {
+                            animating = true;
+                            0.55 + 0.45 * ease_out_back(age / 0.16)
+                        } else {
+                            1.0
+                        };
+                        if self.won {
+                            let t = (now - self.ended_at) as f32 - (r + c) as f32 * 0.035;
+                            if (0.0..0.4).contains(&t) {
+                                s *= 1.0 + 0.1 * (PI * t / 0.4).sin();
+                            }
+                            if t < 0.4 {
+                                animating = true;
+                            }
+                        }
+                        let clip = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+                        draw_cat(&clip, rect.center(), tile * s, 1.0);
+                    }
+                    Cell::X => {
+                        if age < 0.2 {
+                            animating = true;
+                        }
+                        draw_x(&painter, rect, age);
+                    }
+                    Cell::Empty => {}
+                }
+            }
+        }
+        if self.hint.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(30));
+        }
+
+        // ── end-of-run panel ──
+        if self.won || self.game_over {
+            let t = (now - self.ended_at) as f32;
+            let e = ease_out(t / 0.35);
+            if t < 0.9 {
+                animating = true;
+            }
+            painter.rect_filled(well, cr(well_r), CARD.gamma_multiply(0.55 * e));
+            let w = (well.width() * 0.62).clamp(240.0, 400.0);
+            let h = 188.0f32.min(well.height() * 0.8);
+            let panel = Rect::from_center_size(
+                well.center() + Vec2::new(0.0, 10.0 * (1.0 - e)),
+                Vec2::new(w, h) * (0.94 + 0.06 * e),
+            );
+            painter.add(soft_shadow(10, 30, 0, (52.0 * e) as u8).as_shape(panel, cr(18.0)));
+            painter.rect_filled(panel, cr(18.0), CARD.gamma_multiply(e));
+            painter.rect_stroke(panel, cr(18.0), Stroke::new(1.0, HAIRLINE.gamma_multiply(e)), StrokeKind::Inside);
+            let top = panel.top();
+            let cx = panel.center().x;
+            let badge = Rect::from_center_size(Pos2::new(cx, top + 38.0), Vec2::splat(44.0));
+            let (badge_col, title) = if self.won { (ACCENT, "Solved") } else { (INK_SOFT, "Out of lives") };
+            painter.rect_filled(badge, cr(13.0), badge_col.gamma_multiply(e));
+            draw_cat(&painter.with_clip_rect(badge.shrink(1.0)), badge.center() + Vec2::new(0.0, 1.0), 44.0, e);
+            painter.text(
+                Pos2::new(cx, top + 88.0),
+                Align2::CENTER_CENTER,
+                title,
+                font(30.0, W::Bold),
+                INK.gamma_multiply(e),
+            );
+            let time = fmt_time(self.elapsed.as_millis() as u64);
+            let (sub, tag, tag_col) = if self.won {
+                if self.assisted {
+                    (format!("Time {time}"), String::from("Assisted — not counted"), AMBER)
+                } else {
+                    (format!("Time {time}"), format!("Clean win #{}", self.stats.clean_wins), SAGE)
+                }
+            } else {
+                (String::from("Take an extra life, or start a fresh board"), String::new(), INK_SOFT)
+            };
+            painter.text(
+                Pos2::new(cx, top + 120.0),
+                Align2::CENTER_CENTER,
+                sub,
+                font(15.5, W::Regular),
+                INK_SOFT.gamma_multiply(e),
+            );
+            if !tag.is_empty() {
+                let g = painter.layout_no_wrap(tag, font(13.0, W::Semi), tag_col);
+                let r = Rect::from_center_size(Pos2::new(cx, top + 152.0), g.size() + Vec2::new(24.0, 10.0));
+                painter.rect_filled(r, cr(13.0), tag_col.gamma_multiply(0.15 * e));
+                painter.galley(r.center() - g.size() * 0.5, g, tag_col.gamma_multiply(e));
+            }
+        }
+
+        if animating {
+            ctx.request_repaint();
+        }
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.now = ctx.input(|i| i.time);
         self.poll_generator(&ctx);
 
         if self.start.is_some() && !self.won && !self.game_over {
@@ -407,266 +1246,28 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         if let Some((_, t)) = self.wrong {
-            if t.elapsed() < Duration::from_millis(700) {
-                ctx.request_repaint_after(Duration::from_millis(40));
-            } else {
+            if self.now - t > 0.8 {
                 self.wrong = None;
             }
         }
 
-        egui::Panel::top("hud").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Cats Grid").size(24.0).strong());
-                ui.add_space(14.0);
-                ui.label(egui::RichText::new(format!("Lives {}/{}", self.lives, self.max_lives)).size(17.0).color(
-                    if self.lives >= 2 { Color32::from_rgb(30, 120, 60) } else { Color32::from_rgb(180, 40, 40) },
-                ));
-                ui.add_space(12.0);
-                ui.label(egui::RichText::new(format!("Time {}", fmt_time(self.elapsed.as_millis() as u64))).size(17.0));
-                ui.add_space(12.0);
-                ui.label(
-                    egui::RichText::new(format!("Clean wins {}", self.stats.clean_wins))
-                        .size(17.0)
-                        .strong()
-                        .color(Color32::from_rgb(20, 110, 60)),
-                );
-                ui.label(egui::RichText::new(format!("(assisted {})", self.stats.assisted_wins)).size(14.0).weak());
-                if self.assisted {
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new("assisted run")
-                            .size(14.0)
-                            .color(Color32::from_rgb(170, 90, 20)),
-                    );
-                }
-                if let Some(best) = self.stats.best_clean_ms {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(format!("best clean {}", fmt_time(best))).size(14.0).weak());
-                    });
-                }
-            });
-            ui.add_space(4.0);
-        });
+        let bare = |m: egui::Margin| egui::Frame::new().fill(BG).inner_margin(m);
 
-        egui::Panel::bottom("controls").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.won && !self.game_over && self.puzzle.is_some(), egui::Button::new(egui::RichText::new("Hint").size(18.0))).clicked() {
-                    self.give_hint();
-                }
-                if ui
-                    .add_enabled(!self.won && self.puzzle.is_some(), egui::Button::new(egui::RichText::new("Extra life").size(18.0)))
-                    .clicked()
-                {
-                    self.buy_extra_life();
-                }
-                if ui.add_enabled(!self.won, egui::Button::new(egui::RichText::new("Clear marks").size(18.0))).clicked() {
-                    self.clear_marks();
-                }
-                ui.add_space(10.0);
-                if ui.button(egui::RichText::new("New game").size(18.0)).clicked() {
-                    self.request_new_puzzle();
-                }
-                ui.add_space(14.0);
-                ui.label(egui::RichText::new(&self.message).size(16.0));
-            });
-            if let Some(text) = self.hint_text.clone() {
-                ui.add_space(6.0);
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(255, 248, 227))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(226, 196, 126)))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(
-                            egui::RichText::new("Why this cat")
-                                .size(13.0)
-                                .strong()
-                                .color(Color32::from_rgb(146, 99, 18)),
-                        );
-                        ui.label(
-                            egui::RichText::new(text)
-                                .size(15.5)
-                                .color(Color32::from_rgb(58, 44, 18)),
-                        );
-                    });
-            }
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("Left click: place a cat. Right click: mark a cell you ruled out.")
-                    .size(13.0)
-                    .weak(),
-            );
-            ui.add_space(4.0);
-        });
+        egui::Panel::top("hud")
+            .frame(bare(egui::Margin { left: 22, right: 22, top: 16, bottom: 6 }))
+            .show_separator_line(false)
+            .resizable(false)
+            .show(ui, |ui| self.header(ui));
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            let full = ui.max_rect();
-            let side = (full.width().min(full.height()) - 12.0).max(120.0);
-            let grid = Rect::from_center_size(full.center(), Vec2::splat(side));
-            let response = ui.allocate_rect(full, Sense::click());
+        egui::Panel::bottom("controls")
+            .frame(bare(egui::Margin { left: 22, right: 22, top: 6, bottom: 14 }))
+            .show_separator_line(false)
+            .resizable(false)
+            .show(ui, |ui| self.controls(ui));
 
-            let Some(p) = self.puzzle.clone() else {
-                ui.painter().text(
-                    full.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Building a puzzle…",
-                    egui::FontId::proportional(26.0),
-                    Color32::GRAY,
-                );
-                return;
-            };
-
-            let cell = side / self.n as f32;
-            let painter = ui.painter();
-
-            for r in 0..self.n {
-                for c in 0..self.n {
-                    let rect = Rect::from_min_size(
-                        grid.min + Vec2::new(c as f32 * cell, r as f32 * cell),
-                        Vec2::splat(cell),
-                    );
-                    let g = p.region_at(r, c);
-                    painter.rect_filled(rect, CornerRadius::ZERO, region_color(g, self.n));
-
-                    if let Some(((wr, wc), t)) = self.wrong {
-                        if wr == r && wc == c {
-                            let a = 1.0 - (t.elapsed().as_secs_f32() / 0.7).min(1.0);
-                            painter.rect_filled(
-                                rect,
-                                CornerRadius::ZERO,
-                                Color32::from_rgba_unmultiplied(220, 40, 40, (150.0 * a) as u8),
-                            );
-                        }
-                    }
-
-                    match self.cells[r * self.n + c] {
-                        Cell::Cat => draw_cat(painter, rect),
-                        Cell::X => {
-                            let st = Stroke::new((cell * 0.07).max(2.0), Color32::from_rgb(90, 90, 105));
-                            let pad = cell * 0.24;
-                            painter.line_segment(
-                                [rect.left_top() + Vec2::splat(pad), rect.right_bottom() - Vec2::splat(pad)],
-                                st,
-                            );
-                            painter.line_segment(
-                                [rect.right_top() + Vec2::new(-pad, pad), rect.left_bottom() + Vec2::new(pad, -pad)],
-                                st,
-                            );
-                        }
-                        Cell::Empty => {}
-                    }
-                }
-            }
-
-            // region borders + outer frame
-            let border = Stroke::new((cell * 0.045).max(2.0), Color32::from_rgb(45, 45, 55));
-            let thin = Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 70, 80, 90));
-            for r in 0..self.n {
-                for c in 0..self.n {
-                    let rect = Rect::from_min_size(
-                        grid.min + Vec2::new(c as f32 * cell, r as f32 * cell),
-                        Vec2::splat(cell),
-                    );
-                    painter.line_segment([rect.left_top(), rect.right_top()], thin);
-                    painter.line_segment([rect.left_top(), rect.left_bottom()], thin);
-                    if c + 1 < self.n && p.region_at(r, c) != p.region_at(r, c + 1) {
-                        painter.line_segment(
-                            [rect.right_top(), rect.right_bottom()],
-                            border,
-                        );
-                    }
-                    if r + 1 < self.n && p.region_at(r, c) != p.region_at(r + 1, c) {
-                        painter.line_segment(
-                            [rect.left_bottom(), rect.right_bottom()],
-                            border,
-                        );
-                    }
-                }
-            }
-            painter.rect_stroke(grid, CornerRadius::ZERO, border, egui::StrokeKind::Outside);
-
-            // hint pulse
-            if let Some((hr, hc)) = self.hint {
-                let rect = Rect::from_min_size(
-                    grid.min + Vec2::new(hc as f32 * cell, hr as f32 * cell),
-                    Vec2::splat(cell),
-                );
-                let t = self.hint_at.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
-                let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs();
-                painter.rect_stroke(
-                    rect.shrink(cell * 0.05),
-                    CornerRadius::ZERO,
-                    Stroke::new((cell * 0.055).max(3.0), Color32::from_rgba_unmultiplied(25, 150, 70, (255.0 * pulse) as u8)),
-                    egui::StrokeKind::Inside,
-                );
-                ctx.request_repaint_after(Duration::from_millis(40));
-            }
-
-            if (self.won || self.game_over) && response.clicked() {
-                // nothing: avoids accidental board edits behind the overlay
-            }
-
-            if !self.won && !self.game_over {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    if grid.contains(pos) {
-                        let cc = (((pos.x - grid.min.x) / cell).floor() as isize).clamp(0, self.n as isize - 1) as usize;
-                        let rr = (((pos.y - grid.min.y) / cell).floor() as isize).clamp(0, self.n as isize - 1) as usize;
-                        if response.clicked() {
-                            match self.cells[rr * self.n + cc] {
-                                Cell::Cat => self.cells[rr * self.n + cc] = Cell::Empty,
-                                Cell::X => self.cells[rr * self.n + cc] = Cell::Empty,
-                                Cell::Empty => self.place_cat(rr, cc),
-                            }
-                        } else if response.secondary_clicked() {
-                            self.cells[rr * self.n + cc] = match self.cells[rr * self.n + cc] {
-                                Cell::Empty => Cell::X,
-                                Cell::X => Cell::Empty,
-                                Cell::Cat => Cell::Cat,
-                            };
-                        }
-                    }
-                }
-            }
-
-            if self.won || self.game_over {
-                let box_rect = Rect::from_center_size(grid.center(), Vec2::new(side * 0.62, side * 0.26));
-                painter.rect_filled(box_rect, CornerRadius::same(14), Color32::from_rgba_unmultiplied(20, 22, 28, 232));
-                let title = if self.won { "Solved" } else { "Out of lives" };
-                painter.text(
-                    box_rect.center() - Vec2::new(0.0, side * 0.045),
-                    egui::Align2::CENTER_CENTER,
-                    title,
-                    egui::FontId::proportional(side * 0.055),
-                    Color32::from_rgb(245, 246, 250),
-                );
-                let sub = if self.won {
-                    if self.assisted {
-                        format!("{} — assisted, not counted", fmt_time(self.elapsed.as_millis() as u64))
-                    } else {
-                        format!("{} — clean win #{}", fmt_time(self.elapsed.as_millis() as u64), self.stats.clean_wins)
-                    }
-                } else {
-                    String::from("Extra life, or start a fresh board")
-                };
-                painter.text(
-                    box_rect.center() + Vec2::new(0.0, side * 0.012),
-                    egui::Align2::CENTER_CENTER,
-                    sub,
-                    egui::FontId::proportional(side * 0.026),
-                    Color32::from_rgb(205, 208, 216),
-                );
-                painter.text(
-                    box_rect.center() + Vec2::new(0.0, side * 0.062),
-                    egui::Align2::CENTER_CENTER,
-                    "use the buttons below",
-                    egui::FontId::proportional(side * 0.02),
-                    Color32::from_rgb(150, 155, 165),
-                );
-            }
-        });
+        egui::CentralPanel::default()
+            .frame(bare(egui::Margin::same(0)))
+            .show(ui, |ui| self.board(ui));
     }
 }
 
@@ -696,9 +1297,5 @@ fn main() -> eframe::Result<()> {
             .with_title("Cats Grid"),
         ..Default::default()
     };
-    eframe::run_native(
-        "Cats Grid",
-        options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
-    )
+    eframe::run_native("Cats Grid", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

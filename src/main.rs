@@ -16,6 +16,7 @@ use eframe::egui::{
 use puzzle::{solutions, Puzzle, DEFAULT_N};
 use stats::Stats;
 use std::f32::consts::PI;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,20 @@ const HINT_TITLE: Color32 = Color32::from_rgb(150, 100, 24);
 const HINT_TEXT: Color32 = Color32::from_rgb(64, 50, 26);
 const WRONG: Color32 = Color32::from_rgb(222, 64, 58);
 const X_INK: Color32 = Color32::from_rgb(58, 40, 52);
+
+// layout / input
+/// two presses on the same cell within this many seconds are a double click
+const DOUBLE_CLICK_S: f64 = 0.45;
+/// widest the header's full layout and the hint card get
+const CONTENT_MAX_W: f32 = 760.0;
+const PILL_H: f32 = 36.0;
+const PILL_PAD_X: f32 = 32.0;
+/// extra air between the secondary buttons and "New game"
+const GROUP_GAP: f32 = 22.0;
+/// free-deduction buttons offered at once
+const MAX_DEDUCTIONS: usize = 3;
+/// `changed_at` value for a cell that has not changed yet (animation long over)
+const UNCHANGED: f64 = -10.0;
 
 // cat
 const CAT_INK: Color32 = Color32::from_rgb(50, 45, 44);
@@ -341,12 +356,12 @@ enum Kind {
 }
 
 fn button_width(ui: &egui::Ui, text: &str) -> f32 {
-    ui.painter().layout_no_wrap(text.to_owned(), font(13.0, W::Semi), INK).size().x + 32.0
+    ui.painter().layout_no_wrap(text.to_owned(), font(13.0, W::Semi), INK).size().x + PILL_PAD_X
 }
 
 fn pill_button(ui: &mut egui::Ui, text: &str, kind: Kind, enabled: bool) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font(13.0, W::Semi), INK);
-    let size = Vec2::new(galley.size().x + 32.0, 36.0);
+    let size = Vec2::new(galley.size().x + PILL_PAD_X, PILL_H);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let hovered = enabled && resp.hovered();
@@ -419,7 +434,10 @@ struct Drag {
 
 struct App {
     n: usize,
-    puzzle: Option<Puzzle>,
+    puzzle: Option<Rc<Puzzle>>,
+    /// free deductions for `deds_for` (the cells they were computed from)
+    deds: Vec<rules::Deduction>,
+    deds_for: Vec<Cell>,
     cells: Vec<Cell>,
     /// egui time of each cell's last change (drives pop / fade animations)
     changed_at: Vec<f64>,
@@ -462,8 +480,10 @@ impl App {
         let mut app = App {
             n: DEFAULT_N,
             puzzle: None,
+            deds: Vec::new(),
+            deds_for: Vec::new(),
             cells: vec![Cell::Empty; DEFAULT_N * DEFAULT_N],
-            changed_at: vec![-10.0; DEFAULT_N * DEFAULT_N],
+            changed_at: vec![UNCHANGED; DEFAULT_N * DEFAULT_N],
             lives: 3,
             max_lives: 3,
             hint: None,
@@ -507,7 +527,7 @@ impl App {
         self.rx = Some(rx);
         self.puzzle = None;
         self.cells = vec![Cell::Empty; self.n * self.n];
-        self.changed_at = vec![-10.0; self.n * self.n];
+        self.changed_at = vec![UNCHANGED; self.n * self.n];
         self.lives = self.max_lives;
         self.hint = None;
         self.hint_text = None;
@@ -535,8 +555,8 @@ impl App {
                     self.gen_ms = Some(rep.elapsed.as_millis());
                     self.n = rep.puzzle.n;
                     self.cells = vec![Cell::Empty; self.n * self.n];
-                    self.changed_at = vec![-10.0; self.n * self.n];
-                    self.puzzle = Some(rep.puzzle);
+                    self.changed_at = vec![UNCHANGED; self.n * self.n];
+                    self.puzzle = Some(Rc::new(rep.puzzle));
                     if std::env::var_os("CATS_DEBUG").is_some() {
                         if let Some(p) = &self.puzzle {
                             eprintln!("SOLUTION n={} {:?}", p.n, p.solution);
@@ -677,30 +697,36 @@ impl App {
         }
     }
 
-    /// Rule-by-rule X marks available on the current board.
-    fn deductions(&self) -> Vec<rules::Deduction> {
-        if self.won || self.game_over {
-            return Vec::new();
+    /// Rule-by-rule X marks available on the current board (the biggest few).
+    /// Only recomputed when the marks on the board have changed.
+    fn refresh_deductions(&mut self) {
+        if self.deds_for == self.cells {
+            return;
         }
-        let Some(p) = self.puzzle.as_ref() else { return Vec::new() };
+        self.deds_for = self.cells.clone();
+        self.deds.clear();
+        let Some(p) = self.puzzle.clone() else { return };
         let n = self.n;
         let cats = self.cats();
-        rules::deductions(
+        self.deds = rules::deductions(
             n,
             &p.region,
             &cats,
             &|g| color_name(g, n),
             &|r, c| self.cells[r * n + c] == Cell::Empty,
-        )
+        );
+        self.deds.truncate(MAX_DEDUCTIONS);
     }
 
     /// Apply one rule's X marks and show the reasoning behind them.
-    fn apply_deduction(&mut self, d: &rules::Deduction) {
-        for &(r, c) in &d.cells {
+    fn apply_deduction(&mut self, i: usize) {
+        let Some(d) = self.deds.get(i) else { return };
+        let (cells, why) = (d.cells.clone(), d.why.clone());
+        for (r, c) in cells {
             self.set_cell(r * self.n + c, Cell::X);
         }
         self.assisted = true;
-        self.message = d.why.clone();
+        self.message = why;
     }
 
     fn give_hint(&mut self) {
@@ -721,8 +747,8 @@ impl App {
             self.message = String::from("One of your X marks is on the real cat — clear some X's.");
             return;
         }
-        let sol = with_xs[0].clone();
-        let Some((target, why)) = puzzle::best_hint(self.n, &p.region, &cats, &sol, &|g| color_name(g, self.n))
+        let Some(sol) = with_xs.first() else { return };
+        let Some((target, why)) = puzzle::best_hint(self.n, &p.region, &cats, sol, &|g| color_name(g, self.n))
         else {
             return;
         };
@@ -767,12 +793,17 @@ impl App {
     /// single click leaves them alone.
     fn single_click(&mut self, idx: usize) {
         let prev = self.cells[idx];
-        match prev {
+        self.toggle_x(idx);
+        self.last_click = Some((idx, prev));
+    }
+
+    /// Empty ↔ X; a cat is never touched.
+    fn toggle_x(&mut self, idx: usize) {
+        match self.cells[idx] {
             Cell::Empty => self.set_cell(idx, Cell::X),
             Cell::X => self.set_cell(idx, Cell::Empty),
             Cell::Cat => {}
         }
-        self.last_click = Some((idx, prev));
     }
 
     /// Double click: egui reports the first click on its own a moment earlier,
@@ -801,11 +832,7 @@ impl App {
             return;
         }
         *cur = idx;
-        match self.cells[idx] {
-            Cell::Empty => self.set_cell(idx, Cell::X),
-            Cell::X => self.set_cell(idx, Cell::Empty),
-            Cell::Cat => {}
-        }
+        self.toggle_x(idx);
     }
 }
 
@@ -855,7 +882,7 @@ impl Board {
 
 impl App {
     fn header(&mut self, ui: &mut egui::Ui) {
-        let wide = ui.available_width() > 760.0;
+        let wide = ui.available_width() > CONTENT_MAX_W;
         ui.horizontal(|ui| {
             // badge
             let (badge, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
@@ -912,7 +939,7 @@ impl App {
 
         if let Some(text) = self.hint_text.clone() {
             let avail = ui.available_width();
-            let w = avail.min(760.0);
+            let w = avail.min(CONTENT_MAX_W);
             ui.horizontal(|ui| {
                 ui.add_space(((avail - w) * 0.5).max(0.0));
                 ui.vertical(|ui| {
@@ -946,8 +973,8 @@ impl App {
         }
 
         if playing {
-            let deds = self.deductions();
-            let shown: Vec<rules::Deduction> = deds.into_iter().take(3).collect();
+            self.refresh_deductions();
+            let shown = &self.deds;
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new("FREE DEDUCTIONS · click one to mark its X's")
@@ -985,7 +1012,7 @@ impl App {
                     }
                 });
                 if let Some(i) = clicked {
-                    self.apply_deduction(&shown[i]);
+                    self.apply_deduction(i);
                 }
             }
             ui.add_space(8.0);
@@ -994,7 +1021,7 @@ impl App {
         let labels = ["Hint", "Extra life", "Clear marks", "New game"];
         let spacing = 10.0;
         let total: f32 =
-            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 2.0 + 22.0;
+            labels.iter().map(|l| button_width(ui, l)).sum::<f32>() + spacing * 2.0 + GROUP_GAP;
         let avail = ui.available_width();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = spacing;
@@ -1008,7 +1035,7 @@ impl App {
             if pill_button(ui, "Clear marks", Kind::Tonal, !self.won).clicked() {
                 self.clear_marks();
             }
-            ui.add_space(22.0 - spacing);
+            ui.add_space(GROUP_GAP - spacing);
             if pill_button(ui, "New game", Kind::Primary, true).clicked() {
                 self.request_new_puzzle();
             }
@@ -1142,7 +1169,7 @@ impl App {
                         eprintln!("PRESS pos={:?} at={:?} inner={:?}", p, at, b.inner);
                     }
                     let Some(idx) = at else { continue };
-                    let dbl = matches!(self.last_press, Some((i, t)) if i == idx && self.now - t < 0.45);
+                    let dbl = matches!(self.last_press, Some((i, t)) if i == idx && self.now - t < DOUBLE_CLICK_S);
                     if dbl {
                         self.last_press = None;
                         self.double_click(idx);
@@ -1154,11 +1181,7 @@ impl App {
                 if let Some(idx) = response.interact_pointer_pos().and_then(|q| b.cell_at(q)) {
                     if response.secondary_clicked() {
                         // right click kept as a plain X toggle
-                        match self.cells[idx] {
-                            Cell::Empty => self.set_cell(idx, Cell::X),
-                            Cell::X => self.set_cell(idx, Cell::Empty),
-                            Cell::Cat => {}
-                        }
+                        self.toggle_x(idx);
                     }
                 }
             }

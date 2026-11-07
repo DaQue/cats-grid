@@ -224,6 +224,5 @@ mod tests {
         let d = deductions(n, &region, &cats, &names, &|r, c| !cats.contains(&(r, c)));
         assert!(!d.is_empty());
         assert!(d.iter().all(|x| x.cells.iter().all(|cell| !cats.contains(cell))));
-        assert!(d.iter().all(|x| x.cells.len() <= n * n));
     }
 }

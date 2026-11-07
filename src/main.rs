@@ -6,6 +6,7 @@
 //! warm "paper" theme, rounded pastel tiles, a vector cat face, paw lives.
 
 mod puzzle;
+mod rules;
 mod stats;
 
 use eframe::egui::{
@@ -412,6 +413,8 @@ struct Drag {
     origin: usize,
     last: Pos2,
     painting: bool,
+    /// cells already flipped during this stroke — one flip per cell per drag
+    touched: Vec<usize>,
 }
 
 struct App {
@@ -674,6 +677,32 @@ impl App {
         }
     }
 
+    /// Rule-by-rule X marks available on the current board.
+    fn deductions(&self) -> Vec<rules::Deduction> {
+        if self.won || self.game_over {
+            return Vec::new();
+        }
+        let Some(p) = self.puzzle.as_ref() else { return Vec::new() };
+        let n = self.n;
+        let cats = self.cats();
+        rules::deductions(
+            n,
+            &p.region,
+            &cats,
+            &|g| color_name(g, n),
+            &|r, c| self.cells[r * n + c] == Cell::Empty,
+        )
+    }
+
+    /// Apply one rule's X marks and show the reasoning behind them.
+    fn apply_deduction(&mut self, d: &rules::Deduction) {
+        for &(r, c) in &d.cells {
+            self.set_cell(r * self.n + c, Cell::X);
+        }
+        self.assisted = true;
+        self.message = d.why.clone();
+    }
+
     fn give_hint(&mut self) {
         if self.won || self.game_over {
             return;
@@ -764,10 +793,17 @@ impl App {
         }
     }
 
-    /// Drag-painting only ever adds X marks to empty cells.
-    fn paint_x(&mut self, idx: usize) {
-        if self.cells[idx] == Cell::Empty {
-            self.set_cell(idx, Cell::X);
+    /// Drag stroke: flip every cell the pointer enters exactly once, so a drag
+    /// over unmarked cells sets X's and a drag over X's clears them.
+    fn drag_flip(&mut self, idx: usize, touched: &mut Vec<usize>) {
+        if touched.contains(&idx) {
+            return;
+        }
+        touched.push(idx);
+        match self.cells[idx] {
+            Cell::Empty => self.set_cell(idx, Cell::X),
+            Cell::X => self.set_cell(idx, Cell::Empty),
+            Cell::Cat => {}
         }
     }
 }
@@ -855,10 +891,11 @@ impl App {
             ui.label(egui::RichText::new("lives").font(font(12.5, W::Regular)).color(INK_SOFT));
             ui.add_space(14.0);
             chip(ui, None, "time", &fmt_time(self.elapsed.as_millis() as u64));
+            ui.add_space(4.0);
+            // always reserve the chip's footprint so the board never re-flows
+            let g = ui.painter().layout_no_wrap("assisted run".into(), font(12.5, W::Semi), AMBER);
+            let (r, _) = ui.allocate_exact_size(g.size() + Vec2::new(20.0, 10.0), Sense::hover());
             if self.assisted {
-                ui.add_space(4.0);
-                let g = ui.painter().layout_no_wrap("assisted run".into(), font(12.5, W::Semi), AMBER);
-                let (r, _) = ui.allocate_exact_size(g.size() + Vec2::new(20.0, 10.0), Sense::hover());
                 ui.painter().rect_filled(r, cr(12.0), AMBER.gamma_multiply(0.14));
                 ui.painter().galley(r.center() - g.size() * 0.5, g, AMBER);
             }
@@ -907,6 +944,52 @@ impl App {
             ui.add_space(10.0);
         }
 
+        if playing {
+            let deds = self.deductions();
+            let shown: Vec<rules::Deduction> = deds.into_iter().take(3).collect();
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("FREE DEDUCTIONS · click one to mark its X's")
+                        .font(font(11.5, W::Semi))
+                        .color(INK_FAINT),
+                );
+            });
+            ui.add_space(6.0);
+            let avail = ui.available_width();
+            if shown.is_empty() {
+                // keep the strip's height constant so the board never jumps
+                ui.horizontal(|ui| {
+                    let w = button_width(ui, "no deductions yet");
+                    ui.add_space(((avail - w) * 0.5).max(0.0));
+                    pill_button(ui, "no deductions yet", Kind::Tonal, false);
+                });
+            } else {
+                let spacing = 8.0;
+                let labels: Vec<String> = shown
+                    .iter()
+                    .map(|d| format!("{}  ·  {}", d.title, d.cells.len()))
+                    .collect();
+                let total: f32 = labels.iter().map(|l| button_width(ui, l)).sum::<f32>()
+                    + spacing * (labels.len() as f32 - 1.0);
+                let mut clicked: Option<usize> = None;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = spacing;
+                    ui.add_space(((avail - total) * 0.5).max(0.0));
+                    for (i, label) in labels.iter().enumerate() {
+                        let r = pill_button(ui, label, Kind::Tonal, true);
+                        if r.clicked() {
+                            clicked = Some(i);
+                        }
+                        r.on_hover_text(&shown[i].why);
+                    }
+                });
+                if let Some(i) = clicked {
+                    self.apply_deduction(&shown[i]);
+                }
+            }
+            ui.add_space(8.0);
+        }
+
         let labels = ["Hint", "Extra life", "Clear marks", "New game"];
         let spacing = 10.0;
         let total: f32 =
@@ -932,7 +1015,7 @@ impl App {
         ui.add_space(8.0);
         ui.vertical_centered(|ui| {
             ui.label(
-                egui::RichText::new("Click: mark X   ·   Double-click: place a cat   ·   Drag: paint X marks")
+                egui::RichText::new("Click: mark X   ·   Double-click: place a cat   ·   Drag: toggle X marks")
                     .font(font(12.5, W::Regular))
                     .color(INK_SOFT),
             );
@@ -1010,7 +1093,7 @@ impl App {
             if pressed && response.contains_pointer() {
                 if let Some(pos) = pos {
                     if let Some(origin) = b.cell_at(pos) {
-                        self.drag = Some(Drag { origin, last: pos, painting: false });
+                        self.drag = Some(Drag { origin, last: pos, painting: false, touched: Vec::new() });
                     }
                 }
             }
@@ -1018,14 +1101,18 @@ impl App {
             if let (Some(d), true, Some(pos)) = (drag.as_mut(), down, pos) {
                 if !d.painting && (b.cell_at(pos) != Some(d.origin) || decided) {
                     d.painting = true;
-                    self.paint_x(d.origin);
+                    // the press already toggled the origin cell (single_click runs on
+                    // press), so treat it as part of the stroke and never flip it twice
+                    if !d.touched.contains(&d.origin) {
+                        d.touched.push(d.origin);
+                    }
                 }
                 if d.painting {
                     let steps = ((pos - d.last).length() / (tile * 0.25)).ceil().max(1.0) as usize;
                     for s in 1..=steps {
                         let q = d.last + (pos - d.last) * (s as f32 / steps as f32);
                         if let Some(i) = b.cell_at(q) {
-                            self.paint_x(i);
+                            self.drag_flip(i, &mut d.touched);
                         }
                     }
                 }

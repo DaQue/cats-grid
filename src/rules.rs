@@ -12,8 +12,8 @@ pub struct Deduction {
     pub why: String,
     /// cells (row, col) that should be crossed out
     pub cells: Vec<(usize, usize)>,
-    /// true for the "this colour already has its cat" rule
-    pub colour: bool,
+    /// the region id for the "this colour already has its cat" rule, else `None`
+    pub region: Option<u8>,
 }
 
 /// All deductions currently available, biggest win first.
@@ -49,7 +49,7 @@ pub fn deductions(
                 cells.len()
             ),
             cells,
-            colour: false,
+            region: None,
         });
     }
 
@@ -73,7 +73,7 @@ pub fn deductions(
                 cells.len()
             ),
             cells,
-            colour: false,
+            region: None,
         });
     }
 
@@ -105,7 +105,7 @@ pub fn deductions(
                 cells.len()
             ),
             cells,
-            colour: true,
+            region: Some(g),
         });
     }
 
@@ -140,7 +140,7 @@ pub fn deductions(
                 c + 1
             ),
             cells,
-            colour: false,
+            region: None,
         });
     }
 
@@ -236,7 +236,7 @@ mod tests {
     fn only_the_colour_rule_is_flagged_colour() {
         let (n, region, cats) = base();
         let d = deductions(n, &region, &cats, &names, &|_, _| true);
-        assert_eq!(d.iter().filter(|x| x.colour).count(), 1);
-        assert!(d.iter().find(|x| x.colour).is_some_and(|x| x.title == "rose"));
+        assert_eq!(d.iter().filter(|x| x.region.is_some()).count(), 1);
+        assert!(d.iter().find(|x| x.region.is_some()).is_some_and(|x| x.title == "rose"));
     }
 }

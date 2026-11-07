@@ -24,7 +24,8 @@ Launch **Cats Grid** from the application menu, or run
   already holds its cat, and the squares around a cat. When a colour rule applies
   it always gets one of the three slots. One click marks every X that rule implies, and the status line
   explains why ("Row 1 already has its cat in column 10, so the other 9 cells in
-  that row must be empty."). Hovering a button shows that reason before you click.
+  that row must be empty."). Hovering a button shows that reason and ghosts the X's it would place on the
+  board before you click.
   Only rules that follow from what is already on the board are listed — nothing
   speculative, nothing chained. Using one marks the run as assisted.
 - Cats are verified correct when they land, so clicking a cat does nothing; use

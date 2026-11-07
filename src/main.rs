@@ -326,13 +326,17 @@ fn draw_paw(p: &Painter, c: Pos2, s: f32, col: Color32) {
 }
 
 fn draw_x(p: &Painter, rect: Rect, t: f32) {
+    draw_x_alpha(p, rect, t, 0.88);
+}
+
+fn draw_x_alpha(p: &Painter, rect: Rect, t: f32, alpha: f32) {
     // ease-in so the X of a double-click's first click barely shows
     let e = (t / 0.16).clamp(0.0, 1.0);
     let e = e * e * (3.0 - 2.0 * e);
     let k = rect.width();
     let h = 0.275 * k * (0.82 + 0.18 * e);
     let w = (0.085 * k).clamp(2.8, 7.5);
-    let col = X_INK.gamma_multiply(0.88 * e);
+    let col = X_INK.gamma_multiply(alpha * e);
     let c = rect.center();
     round_line(p, vec![c + Vec2::new(-h, -h), c + Vec2::new(h, h)], w, col);
     round_line(p, vec![c + Vec2::new(h, -h), c + Vec2::new(-h, h)], w, col);
@@ -357,6 +361,54 @@ enum Kind {
 
 fn button_width(ui: &egui::Ui, text: &str) -> f32 {
     ui.painter().layout_no_wrap(text.to_owned(), font(13.0, W::Semi), INK).size().x + PILL_PAD_X
+}
+
+const RULE_PAD: f32 = 12.0;
+const RULE_BADGE_H: f32 = 20.0;
+
+fn rule_pill_width(ui: &egui::Ui, title: &str, count: usize) -> f32 {
+    let p = ui.painter();
+    let t = p.layout_no_wrap(title.to_owned(), font(13.0, W::Semi), INK).size().x;
+    let c = p.layout_no_wrap(count.to_string(), font(12.0, W::Semi), ACCENT_DEEP).size().x;
+    RULE_PAD + 16.0 + t + 8.0 + c + 14.0 + 6.0
+}
+
+/// A free-deduction button: icon (region swatch or a small cross), rule title and
+/// a badge with the number of X's it places.
+fn rule_pill(ui: &mut egui::Ui, title: &str, count: usize, swatch: Option<Color32>) -> egui::Response {
+    let w = rule_pill_width(ui, title, count);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, PILL_H), Sense::click());
+    let hovered = resp.hovered();
+    let pressed = resp.is_pointer_button_down_on();
+    let rect = if pressed { rect.translate(Vec2::new(0.0, 1.0)) } else { rect };
+    let p = ui.painter();
+    let fill = if hovered { mix(CARD, ACCENT, 0.10) } else { CARD };
+    let edge = if hovered { ACCENT.gamma_multiply(0.7) } else { HAIRLINE };
+    p.rect_filled(rect, cr(11.0), fill);
+    p.rect_stroke(rect, cr(11.0), Stroke::new(1.0, edge), StrokeKind::Inside);
+    let mut x = rect.left() + RULE_PAD;
+    let cy = rect.center().y;
+    match swatch {
+        Some(c) => {
+            p.circle_filled(Pos2::new(x + 6.0, cy), 6.0, c);
+            p.circle_stroke(Pos2::new(x + 6.0, cy), 6.0, Stroke::new(1.0, shade(c, 0.7)));
+        }
+        None => {
+            let (cc, h) = (Pos2::new(x + 6.0, cy), 3.6);
+            round_line(p, vec![cc + Vec2::new(-h, -h), cc + Vec2::new(h, h)], 1.8, INK_SOFT);
+            round_line(p, vec![cc + Vec2::new(h, -h), cc + Vec2::new(-h, h)], 1.8, INK_SOFT);
+        }
+    }
+    x += 16.0;
+    let tg = p.layout_no_wrap(title.to_owned(), font(13.0, W::Semi), INK);
+    let tw = tg.size().x;
+    p.galley(Pos2::new(x, cy - tg.size().y * 0.5), tg, INK);
+    x += tw + 8.0;
+    let cg = p.layout_no_wrap(count.to_string(), font(12.0, W::Semi), ACCENT_DEEP);
+    let badge = Rect::from_min_size(Pos2::new(x, cy - RULE_BADGE_H * 0.5), Vec2::new(cg.size().x + 14.0, RULE_BADGE_H));
+    p.rect_filled(badge, cr(RULE_BADGE_H * 0.5), ACCENT.gamma_multiply(0.16));
+    p.galley(badge.center() - cg.size() * 0.5, cg, ACCENT_DEEP);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn pill_button(ui: &mut egui::Ui, text: &str, kind: Kind, enabled: bool) -> egui::Response {
@@ -438,6 +490,8 @@ struct App {
     /// free deductions for `deds_for` (the cells they were computed from)
     deds: Vec<rules::Deduction>,
     deds_for: Vec<Cell>,
+    /// cells the hovered deduction would cross out (ghosted on the board)
+    preview: Vec<usize>,
     cells: Vec<Cell>,
     /// egui time of each cell's last change (drives pop / fade animations)
     changed_at: Vec<f64>,
@@ -484,6 +538,7 @@ impl App {
             puzzle: None,
             deds: Vec::new(),
             deds_for: Vec::new(),
+            preview: Vec::new(),
             cells: vec![Cell::Empty; DEFAULT_N * DEFAULT_N],
             changed_at: vec![UNCHANGED; DEFAULT_N * DEFAULT_N],
             x_log: Vec::new(),
@@ -725,8 +780,8 @@ impl App {
         );
         // Colour rules are usually outsized by row/column ones, so make sure the
         // best one still gets a slot while staying within the cap.
-        if self.deds.len() > MAX_DEDUCTIONS && !self.deds[..MAX_DEDUCTIONS].iter().any(|d| d.colour) {
-            if let Some(at) = self.deds.iter().position(|d| d.colour) {
+        if self.deds.len() > MAX_DEDUCTIONS && !self.deds[..MAX_DEDUCTIONS].iter().any(|d| d.region.is_some()) {
+            if let Some(at) = self.deds.iter().position(|d| d.region.is_some()) {
                 self.deds.swap(MAX_DEDUCTIONS - 1, at);
             }
         }
@@ -952,6 +1007,9 @@ impl App {
             ui.add_space(14.0);
             chip(ui, None, "time", &fmt_time(self.elapsed.as_millis() as u64));
             ui.add_space(4.0);
+            let placed = self.cells.iter().filter(|c| **c == Cell::Cat).count();
+            chip(ui, None, "cats", &format!("{}/{}", placed, self.n));
+            ui.add_space(4.0);
             // always reserve the chip's footprint so the board never re-flows
             let g = ui.painter().layout_no_wrap("assisted run".into(), font(12.5, W::Semi), AMBER);
             let (r, _) = ui.allocate_exact_size(g.size() + Vec2::new(20.0, 10.0), Sense::hover());
@@ -1028,24 +1086,29 @@ impl App {
                 });
             } else {
                 let spacing = 8.0;
-                let labels: Vec<String> = shown
-                    .iter()
-                    .map(|d| format!("{}  ·  {}", d.title, d.cells.len()))
-                    .collect();
-                let total: f32 = labels.iter().map(|l| button_width(ui, l)).sum::<f32>()
-                    + spacing * (labels.len() as f32 - 1.0);
+                let n = self.n;
+                let total: f32 = shown.iter().map(|d| rule_pill_width(ui, &d.title, d.cells.len())).sum::<f32>()
+                    + spacing * (shown.len() as f32 - 1.0);
                 let mut clicked: Option<usize> = None;
+                let mut hovered: Option<usize> = None;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = spacing;
                     ui.add_space(((avail - total) * 0.5).max(0.0));
-                    for (i, label) in labels.iter().enumerate() {
-                        let r = pill_button(ui, label, Kind::Tonal, true);
+                    for (i, d) in shown.iter().enumerate() {
+                        let swatch = d.region.map(|g| region_color(g, n));
+                        let r = rule_pill(ui, &d.title, d.cells.len(), swatch);
                         if r.clicked() {
                             clicked = Some(i);
                         }
-                        r.on_hover_text(&shown[i].why);
+                        if r.hovered() {
+                            hovered = Some(i);
+                        }
+                        r.on_hover_text(&d.why);
                     }
                 });
+                if let Some(i) = hovered {
+                    self.preview = shown[i].cells.iter().map(|&(r, c)| r * n + c).collect();
+                }
                 if let Some(i) = clicked {
                     self.apply_deduction(i);
                 }
@@ -1388,7 +1451,17 @@ impl App {
                         }
                         draw_x(&painter, rect, age);
                     }
-                    Cell::Empty => {}
+                    Cell::Empty => {
+                        if self.preview.contains(&idx) {
+                            painter.rect_stroke(
+                                rect.shrink(1.0),
+                                cr(radius),
+                                Stroke::new(1.5, ACCENT.gamma_multiply(0.8)),
+                                StrokeKind::Inside,
+                            );
+                            draw_x_alpha(&painter, rect, 1.0, 0.38);
+                        }
+                    }
                 }
             }
         }
@@ -1461,6 +1534,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.now = ctx.input(|i| i.time);
+        self.preview.clear();
         if std::env::var_os("CATS_DEBUG").is_some() && (self.message != self.last_msg || self.hint_text != self.last_hint) {
             eprintln!("MSG={:?} HINT={:?}", self.message, self.hint_text);
             self.last_msg = self.message.clone();

@@ -17,16 +17,21 @@ SIZE = 256
 SS = 4  # supersampling factor
 S = SIZE * SS
 
-CAT_INK = (50, 45, 44)
-CAT_BODY = (64, 58, 56)
-CAT_CREAM = (246, 236, 219)
-CAT_EAR = (226, 158, 154)
-CAT_EYE = (236, 186, 80)
-CAT_PUPIL = (28, 25, 24)
-CAT_NOSE = (226, 132, 134)
-CAT_WHISKER = (176, 166, 158)
-TOP = (244, 178, 92)     # warm amber
-BOTTOM = (204, 98, 64)   # terracotta
+CAT_LINE = (74, 42, 24)
+CAT_FUR = (204, 132, 70)
+CAT_FUR_LIGHT = (226, 156, 92)
+CAT_FUR_DARK = (178, 108, 56)
+CAT_STRIPE = (98, 56, 30)
+CAT_CREAM = (254, 247, 236)
+CAT_CREAM_SHADE = (226, 212, 192)
+CAT_EAR = (238, 150, 172)
+CAT_EYE = (120, 200, 64)
+CAT_EYE_EDGE = (52, 130, 40)
+CAT_PUPIL = (24, 20, 18)
+CAT_NOSE = (240, 130, 148)
+CAT_WHISKER = (214, 204, 196)
+TOP = (126, 190, 196)    # soft teal
+BOTTOM = (62, 128, 140)  # deeper teal
 
 
 def lerp(a, b, t):
@@ -88,44 +93,66 @@ def thick(d, pts, w, fill):
         ellipse(d, p, w / 2, w / 2, fill)
 
 
+def outlined(d, pts, fill, k, w=0.014):
+    d.polygon(pts, fill=fill)
+    d.line(pts + [pts[0]], fill=CAT_LINE, width=max(2, int(w * k)), joint="curve")
+
+
 def draw_cat(d, cx, cy, k):
     def at(x, y):
         return (cx + x * k, cy + y * k)
 
-    ellipse(d, at(0, 0.47), 0.27 * k, 0.17 * k, CAT_BODY)
-    thick(d, cubic([at(0.14, 0.40), at(0.44, 0.42), at(0.58, 0.18), at(0.47, -0.10)]), 0.075 * k, CAT_BODY)
+    def flip(pts, s):
+        return pts if s < 0 else [pts[0], pts[2], pts[1]]
+
+    body = [at(-0.12, 0.2), at(0.12, 0.2), at(0.30, 0.47), at(-0.30, 0.47)]
+    outlined(d, rounded_poly(body, 0.16), CAT_FUR_DARK, k)
+    ellipse(d, at(0, 0.40), 0.085 * k, 0.12 * k, CAT_CREAM)
 
     for s in (-1, 1):
-        outer = [at(0.285 * s, -0.04), at(0.255 * s, -0.355), at(0.055 * s, -0.175)]
-        d.polygon(rounded_poly(outer, 0.18), fill=CAT_INK)
-        inner = [at(0.235 * s, -0.09), at(0.225 * s, -0.285), at(0.105 * s, -0.17)]
-        d.polygon(rounded_poly(inner, 0.22), fill=CAT_EAR)
+        outer = flip([at(0.285 * s, -0.02), at(0.27 * s, -0.37), at(0.05 * s, -0.16)], s)
+        outlined(d, rounded_poly(outer, 0.16), CAT_FUR, k)
+        inner = flip([at(0.235 * s, -0.07), at(0.235 * s, -0.29), at(0.1 * s, -0.16)], s)
+        d.polygon(rounded_poly(inner, 0.2), fill=CAT_EAR)
 
-    d.polygon(head_shape(at(0, 0.035), 0.305 * k, 0.255 * k), fill=CAT_INK)
+    outlined(d, head_shape(at(0, 0.035), 0.315 * k, 0.26 * k), CAT_FUR, k)
+    ellipse(d, at(0, -0.04), 0.2 * k, 0.12 * k, CAT_FUR_LIGHT)
+
+    sw = max(2, int(0.02 * k))
+    for dx, ln in ((-0.07, 0.07), (0.0, 0.1), (0.07, 0.07)):
+        thick(d, [at(dx, -0.215), at(dx * 0.85, -0.215 + ln)], sw, CAT_STRIPE)
+    for s in (-1, 1):
+        for y, ln in ((0.0, 0.1), (0.055, 0.115), (0.11, 0.09)):
+            thick(d, [at(0.315 * s, y), at((0.315 - ln) * s, y + 0.015)], sw * 0.85, CAT_STRIPE)
+
+    d.polygon(rounded_poly([at(0, -0.17), at(0.052, 0.045), at(-0.052, 0.045)], 0.22), fill=CAT_CREAM)
+    for s in (-1, 1):
+        ellipse(d, at(0.075 * s, 0.14), 0.11 * k, 0.085 * k, CAT_CREAM)
+    ellipse(d, at(0, 0.2), 0.075 * k, 0.05 * k, CAT_CREAM)
 
     for s in (-1, 1):
-        ellipse(d, at(0.068 * s, 0.135), 0.098 * k, 0.074 * k, CAT_CREAM)
-    ellipse(d, at(0, 0.19), 0.07 * k, 0.05 * k, CAT_CREAM)
+        e = at(0.125 * s, -0.01)
+        ellipse(d, e, 0.092 * k, 0.082 * k, CAT_LINE)
+        ellipse(d, e, 0.082 * k, 0.072 * k, CAT_EYE_EDGE)
+        ellipse(d, (e[0], e[1] - 0.008 * k), 0.078 * k, 0.062 * k, CAT_EYE)
+        ellipse(d, e, 0.018 * k, 0.058 * k, CAT_PUPIL)
+        ellipse(d, (e[0] + 0.026 * k, e[1] - 0.026 * k), 0.016 * k, 0.016 * k, (255, 255, 255))
+        d.line(quad(at(0.125 * s - 0.09, -0.08), at(0.125 * s, -0.145), at(0.125 * s + 0.09, -0.08)),
+               fill=CAT_LINE, width=max(2, int(0.014 * k)), joint="curve")
 
+    nose = rounded_poly([at(-0.036, 0.085), at(0.036, 0.085), at(0, 0.12)], 0.3)
+    outlined(d, nose, CAT_NOSE, k, 0.008)
+    mw = max(2, int(0.013 * k))
+    d.line([at(0, 0.12), at(0, 0.14)], fill=CAT_LINE, width=mw)
     for s in (-1, 1):
-        e = at(0.125 * s, -0.012)
-        ellipse(d, e, 0.07 * k, 0.06 * k, CAT_EYE)
-        ellipse(d, e, 0.017 * k, 0.05 * k, CAT_PUPIL)
-        ellipse(d, (e[0] + 0.022 * k, e[1] - 0.022 * k), 0.015 * k, 0.015 * k, (255, 255, 255))
+        d.line(quad(at(0, 0.14), at(0.022 * s, 0.178), at(0.065 * s, 0.148)), fill=CAT_LINE, width=mw, joint="curve")
 
-    d.polygon(rounded_poly([at(-0.034, 0.078), at(0.034, 0.078), at(0, 0.113)], 0.3), fill=CAT_NOSE)
-
-    mw = max(2, int(0.014 * k))
-    d.line([at(0, 0.11), at(0, 0.135)], fill=CAT_INK, width=mw)
+    ww = max(2, int(0.01 * k))
     for s in (-1, 1):
-        d.line(quad(at(0, 0.135), at(0.022 * s, 0.172), at(0.062 * s, 0.142)), fill=CAT_INK, width=mw, joint="curve")
-
-    ww = max(2, int(0.0105 * k))
-    for s in (-1, 1):
-        for i, dy in enumerate((-0.034, 0.0, 0.034)):
-            tilt = (i - 1) * 0.045
-            pts = quad(at(0.14 * s, 0.128 + dy), at(0.31 * s, 0.112 + dy + tilt * 0.5),
-                       at(0.45 * s, 0.096 + dy * 1.4 + tilt))
+        for i, dy in enumerate((-0.03, 0.01, 0.05)):
+            tilt = (i - 1) * 0.05
+            pts = quad(at(0.16 * s, 0.14 + dy), at(0.32 * s, 0.13 + dy + tilt * 0.5),
+                       at(0.46 * s, 0.115 + dy * 1.3 + tilt))
             d.line(pts, fill=CAT_WHISKER, width=ww, joint="curve")
 
 

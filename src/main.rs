@@ -57,14 +57,20 @@ const MAX_DEDUCTIONS: usize = 3;
 const UNCHANGED: f64 = -10.0;
 
 // cat
-const CAT_INK: Color32 = Color32::from_rgb(50, 45, 44);
-const CAT_BODY: Color32 = Color32::from_rgb(64, 58, 56);
-const CAT_CREAM: Color32 = Color32::from_rgb(246, 236, 219);
-const CAT_EAR: Color32 = Color32::from_rgb(226, 158, 154);
-const CAT_EYE: Color32 = Color32::from_rgb(236, 186, 80);
-const CAT_PUPIL: Color32 = Color32::from_rgb(28, 25, 24);
-const CAT_NOSE: Color32 = Color32::from_rgb(226, 132, 134);
-const CAT_WHISKER: Color32 = Color32::from_rgb(158, 148, 140);
+const CAT_LINE: Color32 = Color32::from_rgb(74, 42, 24);
+const CAT_FUR: Color32 = Color32::from_rgb(204, 132, 70);
+const CAT_FUR_LIGHT: Color32 = Color32::from_rgb(226, 156, 92);
+const CAT_FUR_DARK: Color32 = Color32::from_rgb(178, 108, 56);
+const CAT_FUR_SHADE: Color32 = Color32::from_rgb(214, 196, 172);
+const CAT_STRIPE: Color32 = Color32::from_rgb(98, 56, 30);
+const CAT_CREAM: Color32 = Color32::from_rgb(254, 247, 236);
+const CAT_CREAM_SHADE: Color32 = Color32::from_rgb(226, 212, 192);
+const CAT_EAR: Color32 = Color32::from_rgb(238, 150, 172);
+const CAT_EYE: Color32 = Color32::from_rgb(120, 200, 64);
+const CAT_EYE_EDGE: Color32 = Color32::from_rgb(52, 130, 40);
+const CAT_PUPIL: Color32 = Color32::from_rgb(24, 20, 18);
+const CAT_NOSE: Color32 = Color32::from_rgb(240, 130, 148);
+const CAT_WHISKER: Color32 = Color32::from_rgb(214, 204, 196);
 
 /// Ten muted pastels, spread over hue *and* lightness so neighbouring regions
 /// stay distinct for colour-blind eyes too. The name is what the hint text says.
@@ -200,20 +206,6 @@ fn quad(a: Pos2, b: Pos2, c: Pos2, n: usize) -> Vec<Pos2> {
         .collect()
 }
 
-fn cubic(p: [Pos2; 4], n: usize) -> Vec<Pos2> {
-    (0..=n)
-        .map(|i| {
-            let t = i as f32 / n as f32;
-            let u = 1.0 - t;
-            let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-            Pos2::new(
-                a * p[0].x + b * p[1].x + c * p[2].x + d * p[3].x,
-                a * p[0].y + b * p[1].y + c * p[2].y + d * p[3].y,
-            )
-        })
-        .collect()
-}
-
 /// A convex polygon with every corner replaced by a small quadratic arc.
 fn rounded_poly(pts: &[Pos2], frac: f32) -> Vec<Pos2> {
     let n = pts.len();
@@ -267,130 +259,83 @@ fn shaded_ellipse(p: &Painter, c: Pos2, r: Vec2, shift: Vec2, edge: Color32, cor
     }
 }
 
-/// Hand-drawn cat face, `k` = tile size, roughly 70 % coverage. Callers clip.
+/// Cartoon tabby: orange fur, dark outline and stripes, green eyes, white
+/// blaze and muzzle, neck and shoulders. `k` = tile size. Callers clip.
 fn draw_cat(p: &Painter, center: Pos2, k: f32, alpha: f32) {
     let a = |c: Color32| c.gamma_multiply(alpha);
     let at = |x: f32, y: f32| center + Vec2::new(x * k, y * k);
+    let line = Stroke::new((0.014 * k).max(0.9), a(CAT_LINE));
+    let flip = |pts: [Pos2; 3], s: f32| if s < 0.0 { pts } else { [pts[0], pts[2], pts[1]] };
 
-    // body / shoulders peeking from the bottom, tail curling out of frame
-    shaded_ellipse(p, at(0.0, 0.47), Vec2::new(0.27 * k, 0.17 * k), Vec2::new(0.0, -0.05 * k), CAT_INK, Color32::from_rgb(98, 88, 84), alpha);
-    let tail = cubic([at(0.14, 0.40), at(0.44, 0.42), at(0.58, 0.18), at(0.47, -0.10)], 24);
-    round_line(p, tail, 0.075 * k, a(CAT_BODY));
+    // neck and shoulders, cream chest
+    let body = [at(-0.12, 0.2), at(0.12, 0.2), at(0.30, 0.47), at(-0.30, 0.47)];
+    p.add(Shape::convex_polygon(rounded_poly(&body, 0.16), a(CAT_FUR_DARK), line));
+    shaded_ellipse(p, at(0.0, 0.40), Vec2::new(0.085 * k, 0.12 * k), Vec2::new(0.0, -0.02 * k), CAT_FUR_SHADE, CAT_CREAM, alpha);
 
     // ears
     for s in [-1.0f32, 1.0] {
-        let outer = [at(0.285 * s, -0.04), at(0.255 * s, -0.355), at(0.055 * s, -0.175)];
-        let outer = if s < 0.0 { outer } else { [outer[0], outer[2], outer[1]] };
-        p.add(Shape::convex_polygon(rounded_poly(&outer, 0.18), a(CAT_INK), Stroke::NONE));
-        let inner = [at(0.235 * s, -0.09), at(0.225 * s, -0.285), at(0.105 * s, -0.17)];
-        let inner = if s < 0.0 { inner } else { [inner[0], inner[2], inner[1]] };
-        p.add(Shape::convex_polygon(rounded_poly(&inner, 0.22), a(CAT_EAR), Stroke::NONE));
+        let outer = flip([at(0.285 * s, -0.02), at(0.27 * s, -0.37), at(0.05 * s, -0.16)], s);
+        p.add(Shape::convex_polygon(rounded_poly(&outer, 0.16), a(CAT_FUR), line));
+        let inner = flip([at(0.235 * s, -0.07), at(0.235 * s, -0.29), at(0.1 * s, -0.16)], s);
+        p.add(Shape::convex_polygon(rounded_poly(&inner, 0.2), a(CAT_EAR), Stroke::NONE));
     }
 
-    // head
-    p.add(Shape::convex_polygon(head_shape(at(0.0, 0.035), 0.305 * k, 0.255 * k), a(CAT_INK), Stroke::NONE));
+    // head with a lit crown
+    p.add(Shape::convex_polygon(head_shape(at(0.0, 0.035), 0.315 * k, 0.26 * k), a(CAT_FUR), line));
+    shaded_ellipse(p, at(0.0, 0.0), Vec2::new(0.29 * k, 0.23 * k), Vec2::new(0.0, -0.05 * k), CAT_FUR.gamma_multiply(0.0), CAT_FUR_LIGHT, alpha * 0.6);
 
-    // volume: lit crown fading into shadowed jaw
-    shaded_ellipse(
-        p,
-        at(0.0, 0.03),
-        Vec2::new(0.285 * k, 0.235 * k),
-        Vec2::new(0.0, -0.075 * k),
-        CAT_INK.gamma_multiply(0.0),
-        Color32::from_rgb(92, 82, 78),
-        alpha * 0.55,
-    );
-    // fur strands along the head outline
-    let strand = Stroke::new((0.009 * k).max(0.7), a(Color32::from_rgb(86, 77, 73)));
-    for i in 0..22 {
-        let ang = std::f32::consts::PI * (1.05 + 0.9 * i as f32 / 21.0);
-        let (sn, cs) = ang.sin_cos();
-        let base = at(0.0, 0.035) + Vec2::new(cs * 0.29 * k, sn * 0.24 * k);
-        let dir = Vec2::new(cs, sn);
-        let tip = base + dir * (0.035 * k) + Vec2::new(-sn, cs) * (0.012 * k);
-        p.line(vec![base - dir * (0.02 * k), tip], strand);
+    // forehead and cheek stripes
+    let stripe = a(CAT_STRIPE);
+    for (dx, len) in [(-0.07f32, 0.07f32), (0.0, 0.1), (0.07, 0.07)] {
+        round_line(p, vec![at(dx, -0.215), at(dx * 0.85, -0.215 + len)], (0.02 * k).max(1.2), stripe);
     }
-    // dark rims on the head sides and a soft chin shadow
-    p.add(Shape::ellipse_filled(at(0.0, 0.215), Vec2::new(0.11 * k, 0.03 * k), a(Color32::from_rgb(40, 36, 35)).gamma_multiply(0.35)));
-
-    // fur: soft lighter crown, darker cheek edges, tabby forehead stripes
-    let lift = |c: Color32, d: i16| {
-        Color32::from_rgb(
-            (c.r() as i16 + d).clamp(0, 255) as u8,
-            (c.g() as i16 + d).clamp(0, 255) as u8,
-            (c.b() as i16 + d).clamp(0, 255) as u8,
-        )
-    };
-    p.add(Shape::ellipse_filled(at(0.0, -0.075), Vec2::new(0.2 * k, 0.1 * k), a(lift(CAT_INK, 14).gamma_multiply(0.75))));
     for s in [-1.0f32, 1.0] {
-        p.add(Shape::ellipse_filled(at(0.235 * s, 0.075), Vec2::new(0.06 * k, 0.1 * k), a(lift(CAT_INK, -14).gamma_multiply(0.7))));
-    }
-    let stripe = (0.016 * k).max(1.0);
-    for (dx, len) in [(-0.06f32, 0.07f32), (0.0, 0.095), (0.06, 0.07)] {
-        round_line(
-            p,
-            vec![at(dx, -0.2), at(dx * 0.8, -0.2 + len)],
-            stripe,
-            a(lift(CAT_INK, -20)),
-        );
-    }
-    // fluffy cheek tufts
-    for s in [-1.0f32, 1.0] {
-        let tuft = [at(0.285 * s, 0.1), at(0.33 * s, 0.17), at(0.235 * s, 0.17)];
-        let tuft = if s < 0.0 { tuft } else { [tuft[0], tuft[2], tuft[1]] };
-        p.add(Shape::convex_polygon(rounded_poly(&tuft, 0.3), a(CAT_INK), Stroke::NONE));
-    }
-
-    // cream muzzle (two cheeks + chin)
-    for s in [-1.0f32, 1.0] {
-        shaded_ellipse(p, at(0.068 * s, 0.135), Vec2::new(0.098 * k, 0.074 * k), Vec2::new(0.0, -0.012 * k), Color32::from_rgb(214, 196, 172), Color32::from_rgb(252, 244, 230), alpha);
-        for j in 0..3 {
-            let y = 0.12 + 0.02 * j as f32;
-            p.circle_filled(at((0.045 + 0.022 * j as f32) * s, y), (0.0035 * k).max(0.4), a(Color32::from_rgb(170, 150, 130)));
+        for (y, len) in [(0.0f32, 0.1f32), (0.055, 0.115), (0.11, 0.09)] {
+            round_line(p, vec![at(0.315 * s, y), at((0.315 - len) * s, y + 0.015)], (0.017 * k).max(1.0), stripe);
         }
     }
-    shaded_ellipse(p, at(0.0, 0.19), Vec2::new(0.07 * k, 0.05 * k), Vec2::new(0.0, -0.01 * k), Color32::from_rgb(214, 196, 172), CAT_CREAM, alpha);
 
-    // eyes: amber almond, vertical slit, highlight
+    // white blaze between the eyes
+    let blaze = [at(0.0, -0.17), at(0.052, 0.045), at(-0.052, 0.045)];
+    p.add(Shape::convex_polygon(rounded_poly(&blaze, 0.22), a(CAT_CREAM), Stroke::NONE));
+
+    // white muzzle (two cheeks + chin)
     for s in [-1.0f32, 1.0] {
-        let e = at(0.125 * s, -0.012);
-        p.add(Shape::ellipse_filled(e, Vec2::new(0.082 * k, 0.07 * k), a(CAT_PUPIL)));
-        p.add(Shape::ellipse_filled(e, Vec2::new(0.072 * k, 0.06 * k), a(Color32::from_rgb(196, 140, 48))));
-        p.add(Shape::ellipse_filled(e + Vec2::new(0.0, -0.008 * k), Vec2::new(0.058 * k, 0.046 * k), a(CAT_EYE)));
-        p.add(Shape::ellipse_filled(e + Vec2::new(0.0, -0.02 * k), Vec2::new(0.04 * k, 0.022 * k), a(Color32::from_rgb(248, 222, 130))));
-        p.add(Shape::ellipse_filled(e, Vec2::new(0.017 * k, 0.05 * k), a(CAT_PUPIL)));
-        p.add(Shape::ellipse_filled(e + Vec2::new(0.0, -0.04 * k), Vec2::new(0.07 * k, 0.026 * k), a(Color32::from_rgb(30, 26, 25)).gamma_multiply(0.45)));
-        // upper lid
+        shaded_ellipse(p, at(0.075 * s, 0.14), Vec2::new(0.11 * k, 0.085 * k), Vec2::new(0.0, -0.012 * k), CAT_CREAM_SHADE, CAT_CREAM, alpha);
+    }
+    shaded_ellipse(p, at(0.0, 0.2), Vec2::new(0.075 * k, 0.05 * k), Vec2::new(0.0, -0.01 * k), CAT_CREAM_SHADE, CAT_CREAM, alpha);
+
+    // big green eyes with slit pupils
+    for s in [-1.0f32, 1.0] {
+        let e = at(0.125 * s, -0.01);
+        p.add(Shape::ellipse_filled(e, Vec2::new(0.092 * k, 0.082 * k), a(CAT_LINE)));
+        shaded_ellipse(p, e, Vec2::new(0.082 * k, 0.072 * k), Vec2::new(0.0, 0.012 * k), CAT_EYE_EDGE, CAT_EYE, alpha);
+        p.add(Shape::ellipse_filled(e, Vec2::new(0.018 * k, 0.058 * k), a(CAT_PUPIL)));
+        p.circle_filled(e + Vec2::new(0.026 * k, -0.026 * k), (0.016 * k).max(0.8), a(Color32::WHITE));
+        // brow
         p.line(
-            quad(e + Vec2::new(-0.082 * k, 0.004 * k), e + Vec2::new(0.0, -0.1 * k), e + Vec2::new(0.082 * k, 0.004 * k), 12),
-            Stroke::new((0.014 * k).max(0.9), a(CAT_PUPIL)),
+            quad(e + Vec2::new(-0.09 * k, -0.07 * k), e + Vec2::new(0.0, -0.135 * k), e + Vec2::new(0.09 * k, -0.07 * k), 12),
+            Stroke::new((0.014 * k).max(0.9), a(CAT_LINE)),
         );
-        p.circle_filled(e + Vec2::new(0.022 * k, -0.022 * k), (0.015 * k).max(0.8), a(Color32::WHITE));
     }
 
-    // nose
-    let nose = [at(-0.034, 0.078), at(0.034, 0.078), at(0.0, 0.113)];
-    p.add(Shape::convex_polygon(rounded_poly(&nose, 0.3), a(CAT_NOSE), Stroke::NONE));
-
-    p.add(Shape::ellipse_filled(at(-0.008, 0.088), Vec2::new(0.012 * k, 0.006 * k), a(Color32::from_rgb(250, 200, 202))));
-    p.add(Shape::ellipse_filled(at(0.0, 0.12), Vec2::new(0.034 * k, 0.008 * k), a(Color32::from_rgb(40, 36, 35)).gamma_multiply(0.18)));
-
-    // w-shaped mouth
-    let mw = (0.014 * k).max(1.0);
-    let ink = Stroke::new(mw, a(CAT_INK));
-    p.line(vec![at(0.0, 0.11), at(0.0, 0.135)], ink);
+    // nose and w-mouth
+    let nose = [at(-0.036, 0.085), at(0.036, 0.085), at(0.0, 0.12)];
+    p.add(Shape::convex_polygon(rounded_poly(&nose, 0.3), a(CAT_NOSE), Stroke::new((0.008 * k).max(0.6), a(CAT_LINE))));
+    let mouth = Stroke::new((0.013 * k).max(1.0), a(CAT_LINE));
+    p.line(vec![at(0.0, 0.12), at(0.0, 0.14)], mouth);
     for s in [-1.0f32, 1.0] {
-        p.line(quad(at(0.0, 0.135), at(0.022 * s, 0.172), at(0.062 * s, 0.142), 10), ink);
+        p.line(quad(at(0.0, 0.14), at(0.022 * s, 0.178), at(0.065 * s, 0.148), 10), mouth);
     }
 
     // whiskers, three per side
-    let ww = (0.0105 * k).max(0.9);
+    let ww = (0.01 * k).max(0.9);
     for s in [-1.0f32, 1.0] {
-        for (i, dy) in [-0.034f32, 0.0, 0.034].iter().enumerate() {
-            let tilt = (i as f32 - 1.0) * 0.045;
-            let start = at(0.14 * s, 0.128 + dy);
-            let ctrl = at(0.31 * s, 0.112 + dy + tilt * 0.5);
-            let end = at(0.45 * s, 0.096 + dy * 1.4 + tilt);
+        for (i, dy) in [-0.03f32, 0.01, 0.05].iter().enumerate() {
+            let tilt = (i as f32 - 1.0) * 0.05;
+            let start = at(0.16 * s, 0.14 + dy);
+            let ctrl = at(0.32 * s, 0.13 + dy + tilt * 0.5);
+            let end = at(0.46 * s, 0.115 + dy * 1.3 + tilt);
             p.line(quad(start, ctrl, end, 10), Stroke::new(ww, a(CAT_WHISKER)));
         }
     }
